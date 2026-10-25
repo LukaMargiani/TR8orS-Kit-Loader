@@ -4,6 +4,8 @@
 
 A free, open-source Windows app for building sample kits for the **Roland TR-8S**.
 
+(TR8orS should be pronounced as 'Traitors':)
+
 Drop in your own WAV, AIFF or FLAC one-shots and trim, fade, filter and shrink them. Then send the kit straight to the
 TR-8S over USB, or save it as a `.t8k` kit file for the SD card. The app always knows how much of the TR-8S sample
 memory you are using, so kits never fail to load because the memory is full.
