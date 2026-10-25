@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -404,6 +405,33 @@ def put(w, **kw):
         w.config(**kw)
 
 
+class Legend(tk.Text):
+    """Wrapping text whose color words show their color: {green} and {yellow} as text in that color, {orange} like a
+    lit (orange) button. Read-only; as many lines tall as the text needs at the current width."""
+
+    def __init__(self, parent, bg, fg=DIM, font='base', text=''):
+        super().__init__(parent, bg=bg, fg=fg, font=F[font], wrap='word', relief='flat', bd=0, highlightthickness=0,
+                         height=1, cursor='arrow', takefocus=0, padx=0, pady=0)
+        self.tag_configure('green', foreground=USED)
+        self.tag_configure('yellow', foreground=UNUSED)
+        self.tag_configure('orange', background=ACCENT, foreground='#111')
+        self.bind('<Configure>', lambda e: self.fit())
+        self.show(text)
+
+    def show(self, text, fg=None):
+        self.config(state='normal', **({'fg': fg} if fg else {}))
+        self.delete('1.0', 'end')
+        for k, part in enumerate(re.split(r'\{(green|yellow|orange)\}', text)):
+            self.insert('end', part if k % 2 == 0 else f'\u2009{part}\u2009', () if k % 2 == 0 else (part,))
+        self.config(state='disabled')
+        self.fit()
+
+    def fit(self):
+        lines = self.count('1.0', 'end', 'displaylines') or (1,)
+        if int(self.cget('height')) != max(1, lines[0]):
+            self.config(height=max(1, lines[0]))
+
+
 def light(b, on):
     """Orange box while a feature is on."""
     put(b, bg=ACCENT if on else RAISED, fg='#111' if on else TEXT, activebackground=ACCENT if on else HOVER)
@@ -582,7 +610,7 @@ class App:
         tk.Label(mem, text='TR-8S MEMORY', bg=PANEL, fg=DIM, font=F['small_bold']).pack(side='left', padx=(8, 6))
         self.mem_bar = tk.Canvas(mem, width=180, height=12, bg=FIELD, highlightthickness=0)
         self.mem_bar.pack(side='left', pady=8)
-        self.mem_text = wrap(tk.Label(mem, bg=PANEL, fg=TEXT, font=F['base'], anchor='w', justify='left'))
+        self.mem_text = Legend(mem, PANEL, TEXT)
         self.mem_text.pack(side='left', padx=8, fill='x', expand=True)
         button(mem, 'Details…', lambda: details(self)).pack(side='right', padx=6, pady=4)
         button(mem, '?', lambda: rules(self.root), padx=8).pack(side='right', padx=(0, 6), pady=4)
@@ -637,11 +665,11 @@ class App:
         root.drop_target_register(DND_FILES)
         root.dnd_bind('<<Drop>>', lambda e: self.drop(e, None))
         root.bind_all('<Key>', self.key)
-        wrap(tk.Label(kit, bg=BG, fg=DIM, font=F['base'], anchor='w', justify='left', padx=8,
-                      text='Click a pad to select + preview (keys 1–0, -) · double-click / drag a library sample to load '
-                           'it into the selected pad · click the colored header for the TR-8S color · orange = on: '
-                           'Mono, 22.05 kHz (half the memory), Fit (shorten to fit 1 memory block, with a smooth fade)')
-             ).pack(side='bottom', fill='x', pady=(0, 6), before=scroller)  # packed first: never squeezed out
+        Legend(kit, BG, text='Click a pad to select + preview (keys 1–0, -) · double-click / drag a library sample '
+                             'to load it into the selected pad · click the colored header for the TR-8S color · '
+                             '{orange} = on: Mono, 22.05 kHz (half the memory), Fit (shorten to fit 1 memory block, '
+                             'with a smooth fade)'
+               ).pack(side='bottom', fill='x', padx=8, pady=(0, 6), before=scroller)  # packed first: never squeezed out
         self.sel = 0
         self.light_size()
         self.refresh()
@@ -860,10 +888,10 @@ class App:
                                       fill=WARN if over else ACCENT, width=0)
         read = (time.strftime('read %d %b %H:%M', time.localtime(self.mem.read_at)) if self.mem.state else
                 'not read yet: connect it by USB and press Read TR-8S')
-        self.mem_text.config(fg=WARN if over else TEXT,
-                             text=f'{used / lib.BYTES_PER_SECOND:.1f} / {lib.DEVICE_SECONDS:.0f} s   ·   {count} / '
+        self.mem_text.show(fg=WARN if over else TEXT,
+                           text=f'{used / lib.BYTES_PER_SECOND:.1f} / {lib.DEVICE_SECONDS:.0f} s   ·   {count} / '
                                   f'{lib.DEVICE_SAMPLES} samples   ·   {kits} / {lib.DEVICE_KITS} kits   ·   '
-                                  f'this kit adds {add / lib.BYTES_PER_SECOND:.1f} s (orange)   ·   {read}')
+                                  f'this kit adds {add / lib.BYTES_PER_SECOND:.1f} s ({{orange}})   ·   {read}')
         self.dirty = True
 
     def device_status(self, s):
@@ -1193,7 +1221,7 @@ class App:
         done = dict(new=0, reused=0)
 
         def status(text):
-            self.mem_text.config(text=text, fg=ACCENT)
+            self.mem_text.show(text, fg=ACCENT)
             self.root.update()
 
         def work(dev):
@@ -1571,11 +1599,10 @@ class Browser(tk.Frame):
         ttk.Entry(search, font=F['base'], textvariable=self.q).pack(side='left', fill='x', expand=True)
         self.chips = ButtonBar(self, BG, gap=px(2), font='small')
         self.chips.pack(fill='x', pady=6)
-        wrap(tk.Label(self, text='Click = preview · double-click / Enter = load into the selected pad · drag onto a '
-                                 'pad · drop folders or files here to add them. TR-8S column: green = used by a kit, '
-                                 'yellow = on the TR-8S but in no kit.',
-                      bg=BG, fg=DIM, font=F['small'], justify='left', anchor='w')).pack(side='bottom', fill='x',
-                                                                                         pady=(4, 8))
+        Legend(self, BG, font='small',
+               text='Click = preview · double-click / Enter = load into the selected pad · drag onto a pad · drop '
+                    'folders or files here to add them. TR-8S column: {green} = used by a kit, {yellow} = on the '
+                    'TR-8S but in no kit.').pack(side='bottom', fill='x', pady=(4, 8))
         box = tk.Frame(self, bg=BG)
         box.pack(fill='both', expand=True)
         self.tree = ttk.Treeview(box, columns=('type', 'len', 'dev'), selectmode='extended')
