@@ -304,21 +304,87 @@ def button(parent, text, cmd, **kw):
                      activebackground=HOVER, activeforeground=TEXT, padx=7, pady=2, cursor='hand2'), **kw})
 
 
-def flow(frame, gap=4):
-    """Lay the frame's children out left to right, wrapping onto a new line when the window is too narrow."""
-    def lay(_=None):
-        width, x, y, row = frame.winfo_width(), 0, 0, 0
-        for c in frame.winfo_children():
-            cw, ch = c.winfo_reqwidth(), c.winfo_reqheight()
-            if x and x + cw > width:
-                x, y, row = 0, y + row + gap, 0
-            if (c.winfo_x(), c.winfo_y()) != (x, y) or not c.winfo_ismapped():
-                c.place(x=x, y=y)
-            x, row = x + cw + gap, max(row, ch)
-        if frame.winfo_reqheight() != y + row:
-            frame.config(height=y + row)
-    frame.bind('<Configure>', lay)
-    return lay
+class ButtonBar(tk.Canvas):
+    """Buttons, texts, images and widgets in a row that wraps when narrow, drawn on one canvas. Windows repaints
+    every real widget on each resize step (~1.5 ms each), so groups of buttons are drawn instead of being widgets."""
+
+    def __init__(self, parent, bg, gap=4, font='base'):
+        super().__init__(parent, bg=bg, highlightthickness=0, height=1)
+        self.bg, self.gap, self.font, self.items, self.lit, self.drawn = bg, gap, font, [], set(), None
+        self.bind('<Configure>', lambda e: self.lay())
+        self.bind('<Button-1>', self.click)
+        self.tag_bind('btn', '<Enter>', lambda e: self.hover(True))
+        self.tag_bind('btn', '<Leave>', lambda e: self.hover(False))
+
+    def add(self, text='', cmd=None, key=None, image=None, widget=None, fg=TEXT, font=None, gap=None):
+        """A button when cmd is given, else a text (or image / embedded widget). gap: space before it."""
+        self.items.append(dict(text=text, cmd=cmd, key=key or text, image=image, widget=widget, fg=fg,
+                               font=font, gap=self.gap if gap is None else gap))
+        self.drawn = None
+
+    def clear(self):
+        self.items, self.drawn = [], None
+
+    def light(self, key, on):
+        (self.lit.add if on else self.lit.discard)(key)
+        self.drawn = None
+        self.lay()
+
+    def lay(self):
+        w = self.winfo_width()
+        state = (w, tuple(sorted(map(str, self.lit))), F['base'].actual('size'), len(self.items))
+        if w < 2 or state == self.drawn:
+            return
+        self.drawn = state
+        self.delete('all')
+        bh = F['base'].metrics('linespace') + px(6)
+        pos, x, y, row = [], 0, 0, 0
+        for it in self.items:
+            font = F[it['font'] or self.font]
+            iw, ih = ((it['image'].width(), it['image'].height()) if it['image'] else
+                      (it['widget'].winfo_reqwidth(), it['widget'].winfo_reqheight()) if it['widget'] else
+                      (font.measure(it['text']) + (px(14) if it['cmd'] else 0), bh if it['cmd'] else font.metrics('linespace')))
+            if x and x + it['gap'] + iw > w:
+                x, y, row = 0, y + row + self.gap, 0
+            x += it['gap'] if x else 0
+            pos.append((it, x, y, iw, ih, font))
+            x, row = x + iw, max(row, ih)
+        rows = {}
+        for it, x, y, iw, ih, font in pos:  # vertical centre of each wrapped line
+            rows[y] = max(rows.get(y, 0), ih)
+        for it, x, y, iw, ih, font in pos:
+            cy = y + rows[y] / 2
+            if it['image']:
+                self.create_image(x, cy, image=it['image'], anchor='w')
+            elif it['widget']:
+                self.create_window(x, cy, window=it['widget'], anchor='w')
+            elif it['cmd']:
+                on = it['key'] in self.lit
+                tag = f'b:{self.items.index(it)}'
+                self.create_rectangle(x, cy - ih / 2, x + iw, cy + ih / 2, width=0, fill=ACCENT if on else RAISED,
+                                      tags=(tag, 'btn', 'face', 'lit' if on else 'off'))
+                self.create_text(x + iw / 2, cy, text=it['text'], fill='#111' if on else TEXT, font=font,
+                                 tags=(tag, 'btn'))
+            else:
+                self.create_text(x, cy, text=it['text'], fill=it['fg'], font=font, anchor='w')
+        h = max(rows.values(), default=0) + max(rows, default=0)
+        if int(self.cget('height')) != h:
+            self.config(height=h)
+
+    def tag(self):
+        return next((t for t in self.gettags('current') if t.startswith('b:')), None)
+
+    def click(self, e):
+        t = self.tag()
+        if t:
+            self.items[int(t[2:])]['cmd']()
+
+    def hover(self, on):
+        t = self.tag()
+        self.config(cursor='hand2' if on else '')
+        for item in self.find_withtag(t) if t else ():
+            if 'off' in self.gettags(item):
+                self.itemconfig(item, fill=HOVER if on else RAISED)
 
 
 def wrap(label):
@@ -493,28 +559,21 @@ class App:
         # main actions in their own darker box, apart from the library's buttons; wraps when narrow
         box = tk.Frame(root, bg=TOOLBAR, highlightthickness=1, highlightbackground=LINE)
         box.pack(fill='x', padx=10, pady=(10, 6))
-        bar = tk.Frame(box, bg=TOOLBAR, height=40)
+        bar = self.bar = ButtonBar(box, TOOLBAR)
         bar.pack(fill='x', padx=8, pady=8)
-        logo = tk.Frame(bar, bg=TOOLBAR)
-        self.logo = tk.Label(logo, bg=TOOLBAR)
-        self.logo.pack(side='left', padx=(0, 8))
-        tk.Label(logo, text='TR8orS', bg=TOOLBAR, fg=ACCENT, font=F['title_bold']).pack(side='left')
-        tk.Label(logo, text='KIT LOADER', bg=TOOLBAR, fg=DIM, font=F['title']).pack(side='left', padx=(4, 12))
-        for text, cmd in [('New kit', self.new), ('Open…', self.open), ('Load folder…', self.load_folder),
+        bar.add(image=self.logo_image())
+        bar.add('TR8orS', fg=ACCENT, font='title_bold', gap=px(8))
+        bar.add('KIT LOADER', fg=DIM, font='title', gap=px(4))
+        for k, (text, cmd) in enumerate([('New kit', self.new), ('Open…', self.open), ('Load folder…', self.load_folder),
                           ('Save project…', self.save_project), ('Save .t8k…', self.save),
                           ('Send to TR-8S (USB)…', self.send_usb), ('Export to SD card', self.export_sd),
-                          ('TR-8S rules', lambda: rules(self.root))]:
-            button(bar, text, cmd)
-        name = tk.Frame(bar, bg=TOOLBAR)
-        tk.Label(name, text='Kit name', bg=TOOLBAR, fg=TEXT, font=F['base']).pack(side='left', padx=(10, 4))
-        ttk.Entry(name, font=F['base'], textvariable=self.name, width=18).pack(side='left')
-        size = tk.Frame(bar, bg=TOOLBAR)
-        tk.Label(size, text='Size', bg=TOOLBAR, fg=TEXT, font=F['base']).pack(side='left', padx=(10, 4))
-        self.size_btns = {}
+                          ('TR-8S rules', lambda: rules(self.root))]):
+            bar.add(text, cmd, gap=px(12) if k == 0 else None)
+        bar.add('Kit name', gap=px(14))
+        bar.add(widget=ttk.Entry(bar, font=F['base'], textvariable=self.name, width=18))
+        bar.add('Size', gap=px(14))
         for z in ZOOMS:
-            self.size_btns[z] = button(size, f'{round(z * 100)}%', lambda z=z: self.set_zoom(z), padx=4)
-            self.size_btns[z].pack(side='left', padx=1)
-        self.relayout_bar = flow(bar)
+            bar.add(f'{round(z * 100)}%', lambda z=z: self.set_zoom(z), key=z, gap=px(2))
 
         wrap(tk.Label(root, bg=BG, fg=DIM, font=F['base'], anchor='w', justify='left', text=RULE_OF_THUMB)).pack(
             side='bottom', fill='x', padx=12, pady=(0, 8))
@@ -541,14 +600,13 @@ class App:
         self.total = ttk.Label(ram)
         self.total.pack(side='right')
 
-        sd = ttk.Frame(kit, padding=(8, 4, 10, 0))
-        sd.pack(fill='x')
-        ttk.Label(sd, text='TR-8S SD card').pack(side='left', padx=(0, 4))
-        ttk.Entry(sd, font=F['base'], textvariable=self.sd_dir).pack(side='left', fill='x', expand=True)
-        button(sd, '…', self.browse).pack(side='left', padx=(2, 12))
-        self.wav_btn = button(sd, 'Also save WAVs to SAMPLE', self.toggle_wavs)
-        self.wav_btn.pack(side='left')
-        light(self.wav_btn, self.save_wavs)
+        sd = self.sd_bar = ButtonBar(kit, BG)
+        sd.pack(fill='x', padx=(8, 10), pady=(4, 0))
+        sd.add('TR-8S SD card')
+        sd.add(widget=ttk.Entry(sd, font=F['base'], textvariable=self.sd_dir, width=36))
+        sd.add('…', self.browse, gap=px(2))
+        sd.add('Also save WAVs to SAMPLE', self.toggle_wavs, key='wavs', gap=px(12))
+        sd.light('wavs', self.save_wavs)
 
         # pads live in a scrolling area: as many columns as fit, more rows when narrow, never squeezed
         scroller = tk.Frame(kit, bg=BG)
@@ -559,48 +617,23 @@ class App:
         vbar.pack(side='right', fill='y')
         self.pad_canvas.pack(side='left', fill='both', expand=True)
         grid = self.grid = tk.Frame(self.pad_canvas, bg=BG)
-        self.pad_canvas.create_window(0, 0, window=grid, anchor='nw')
-        self.pad_canvas.bind('<Configure>', lambda e: self.reflow())
+        win = self.pad_canvas.create_window(0, 0, window=grid, anchor='nw')
+        self.pad_canvas.bind('<Configure>', lambda e: (self.pad_canvas.itemconfig(win, width=e.width), self.reflow()))
         grid.bind('<Configure>', lambda e: self.pad_canvas.config(scrollregion=self.pad_canvas.bbox('all')))
         root.bind_all('<MouseWheel>', self.wheel, add='+')
         self.cols = 0
         self.pads = []
-        for i, s in enumerate(t8k.SLOTS):
-            f = tk.Frame(grid, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
-            bar = tk.Frame(f)  # colored with the pad in refresh(), so no light strip shows around the label
-            bar.pack(fill='x')
-            head = tk.Label(bar, anchor='w', padx=6, fg='#111', font=F['bold'], cursor='hand2')
-            head.pack(side='left', fill='x', expand=True)
-            head.bind('<Button-1>', lambda e, i=i: self.pick_color(i, e))
-            x = tk.Button(bar, text='✕', command=lambda i=i: self.clear(i), relief='flat', bd=0, fg='#111',
-                          font=F['bold'], padx=6, cursor='hand2', highlightthickness=0)
-            x.pack(side='right')
-            cv = tk.Canvas(f, height=round(PAD_WAVE_H * self.zoom), bg=WAVE_BG, highlightthickness=0, cursor='hand2')
-            cv.pack(fill='x', padx=6, pady=(6, 4))
+        # each pad is drawn on one canvas: Windows moves and repaints every widget on each resize step, and ten
+        # widgets per pad made resizing take ~0.4 s per step (one canvas: ~0.05 s)
+        for i in range(len(t8k.SLOTS)):
+            cv = tk.Canvas(grid, bg=PANEL, highlightthickness=0, cursor='hand2', height=px(250))
             cv.bind('<Configure>', lambda e, i=i: self.draw_pad(i))
-            name = tk.Label(f, anchor='w', bg=PANEL, fg=TEXT, font=F['bold'])
-            info = wrap(tk.Label(f, anchor='w', justify='left', bg=PANEL, fg=DIM, font=F['base']))
-            dev = wrap(tk.Label(f, anchor='w', justify='left', bg=PANEL, fg=DIM, font=F['base']))  # never cut off
-            name.pack(fill='x', padx=6)
-            info.pack(fill='x', padx=6)
-            dev.pack(fill='x', padx=6)
-            rows = tk.Frame(f, bg=PANEL)
-            rows.pack(fill='x', padx=6, pady=6)
-            btns = {}
-            for r, keys in enumerate([[('play', '▶', lambda i=i: self.play(i)), ('edit', 'Edit', lambda i=i: self.edit(i))],
-                                      [('mono', 'Mono', lambda i=i: self.toggle(i, 'mono')),  # toggles: own row
-                                       ('lo', '22.05 kHz', lambda i=i: self.toggle(i, 'lo')),
-                                       ('fit', 'Fit', lambda i=i: self.toggle(i, 'fit'))]]):
-                row = tk.Frame(rows, bg=PANEL)
-                row.pack(fill='x', pady=(2 * r, 0))
-                for key, text, cmd in keys:
-                    btns[key] = button(row, text, cmd, padx=2)
-                    btns[key].pack(side='left', padx=(0, 2), fill='x', expand=True)
-            for w in (f, cv, name, info):
-                w.drop_target_register(DND_FILES)
-                w.dnd_bind('<<Drop>>', lambda e, i=i: self.drop(e, i))
-                w.bind('<Button-1>', lambda e, i=i: (self.select(i), self.play(i)))
-            self.pads.append(dict(frame=f, bar=bar, head=head, x=x, cv=cv, name=name, info=info, dev=dev, **btns))
+            cv.bind('<Button-1>', lambda e, i=i: self.pad_click(i, e))
+            cv.tag_bind('btn', '<Enter>', lambda e, cv=cv: self.pad_hover(cv, True))
+            cv.tag_bind('btn', '<Leave>', lambda e, cv=cv: self.pad_hover(cv, False))
+            cv.drop_target_register(DND_FILES)
+            cv.dnd_bind('<<Drop>>', lambda e, i=i: self.drop(e, i))
+            self.pads.append(dict(frame=cv, cv=cv, texts=None, drawn=None))
         root.drop_target_register(DND_FILES)
         root.dnd_bind('<<Drop>>', lambda e: self.drop(e, None))
         root.bind_all('<Key>', self.key)
@@ -611,7 +644,6 @@ class App:
              ).pack(side='bottom', fill='x', pady=(0, 6), before=scroller)  # packed first: never squeezed out
         self.sel = 0
         self.light_size()
-        self.size_logo()
         self.refresh()
         self.dirty = False
 
@@ -622,8 +654,8 @@ class App:
         cols = max(1, min(11, self.pad_canvas.winfo_width() // round(PAD_W * self.zoom)))
         if cols == self.cols:
             return
-        for c in range(max(cols, self.cols)):  # fixed width: stretching pads made every resize re-lay out all 11
-            self.grid.columnconfigure(c, minsize=round(PAD_W * self.zoom) if c < cols else 0)
+        for c in range(max(cols, self.cols)):
+            self.grid.columnconfigure(c, weight=1 if c < cols else 0, uniform='pad' if c < cols else '')
         self.cols = cols
         for i, p in enumerate(self.pads):
             p['frame'].grid(row=i // cols, column=i % cols, sticky='nsew', padx=3, pady=3)
@@ -643,28 +675,30 @@ class App:
         self.zoom = z
         theme(self.root, z)
         for p in self.pads:
-            p['cv'].config(height=round(PAD_WAVE_H * z))
+            p['drawn'] = None  # sizes follow the fonts
         self.cols = 0
         self.reflow()
+        self.logo_image()
         self.light_size()
-        self.size_logo()
-        self.root.after(50, self.relayout_bar)
         self.refresh()
 
-    def size_logo(self):
-        """The record logo in the toolbar, a little taller than the title row at this view size, so its colors read on the dark toolbar."""
+    def logo_image(self):
+        """The record logo for the toolbar, a little taller than the title at this view size, so its colors read on
+        the dark toolbar."""
         size = px(46 * self.zoom)
         self.logo_img = ImageTk.PhotoImage(self.logo_src.resize((size, size), Image.LANCZOS), master=self.root)
-        self.logo.config(image=self.logo_img)
+        if self.bar.items:
+            self.bar.items[0]['image'], self.bar.drawn = self.logo_img, None
+        return self.logo_img
 
     def light_size(self):
-        for z, b in self.size_btns.items():
-            light(b, z == self.zoom)
+        for z in ZOOMS:
+            self.bar.light(z, z == self.zoom)
 
     def select(self, i):
         self.sel = i
         for k, p in enumerate(self.pads):
-            put(p['frame'], highlightbackground=ACCENT if k == i else LINE, highlightthickness=2 if k == i else 1)
+            p['cv'].itemconfig('sel', outline=ACCENT if k == i else LINE, width=px(2) if k == i else 1)
 
     def key(self, e):
         i = KEYS.find(e.char) if e.char else -1
@@ -708,46 +742,109 @@ class App:
 
     def toggle_wavs(self):
         self.save_wavs = not self.save_wavs
-        light(self.wav_btn, self.save_wavs)
+        self.sd_bar.light('wavs', self.save_wavs)
 
     # ---- pads ----
 
+    PAD_BUTTONS = [[('play', '▶'), ('edit', 'Edit')], [('mono', 'Mono'), ('lo', '22.05 kHz'), ('fit', 'Fit')]]
+
     def draw_pad(self, i):
+        """Draw pad i on its canvas: header, waveform, texts, buttons. Only when something it shows changed."""
         s, p = self.slots[i], self.pads[i]
-        key = (id(s.audio), s.start, s.end, self.meta['colors'][i], p['cv'].winfo_width(), p['cv'].winfo_height())
-        if p.get('drawn') != key:  # refresh() runs on every click; redrawing 11 waveforms each time was the lag
-            p['drawn'] = key
-            draw_wave(p['cv'], None if s.audio is None else s.audio[s.start:s.end], HEX[self.meta['colors'][i]])
+        cv, w = p['cv'], p['cv'].winfo_width()
+        if w < 20 or p['texts'] is None:
+            return
+        color = HEX[self.meta['colors'][i]]
+        key = (w, self.zoom, color, id(s.audio), s.start, s.end, s.mono, s.lo, s.fit, p['texts'])
+        if p['drawn'] == key:
+            return
+        p['drawn'] = key
+        name, info, info_fg, dev, dev_fg = p['texts']
+        g, line, bold = px(6), F['base'].metrics('linespace'), F['bold'].metrics('linespace')
+        cv.delete('all')
+        hh = bold + px(6)
+        cv.create_rectangle(0, 0, w, hh, fill=color, width=0, tags='head')
+        cv.create_text(g, hh / 2, anchor='w', text=f'{KEYS[i]}   {t8k.SLOTS[i]}   ·   {t8k.COLORS[self.meta["colors"][i]]}',
+                       fill='#111', font=F['bold'], tags='head')
+        cv.create_text(w - g, hh / 2, anchor='e', text='✕', fill='#111', font=F['bold'], tags='b:clear')
+        y, wh = hh + g, round(PAD_WAVE_H * self.zoom)
+        cv.create_rectangle(g, y, w - g, y + wh, fill=WAVE_BG, width=0)
+        cv.create_line(g, y + wh / 2, w - g, y + wh / 2, fill=LINE)
+        a = None if s.audio is None else s.audio[s.start:s.end]
+        if a is not None and len(a) > 1:
+            pts = wave_points(a, g, w - g, wh)
+            pts[1::2] = [v + y for v in pts[1::2]]
+            cv.create_polygon(pts, fill=color, outline=color)
+        y += wh + px(4)
+        cv.create_text(g, y, anchor='nw', text=name, fill=TEXT, font=F['bold'])
+        y += bold
+        cv.create_text(g, y, anchor='nw', text=info, fill=info_fg, font=F['base'], width=w - 2 * g)
+        y += 2 * line
+        if dev:
+            t = cv.create_text(g, y, anchor='nw', text=dev, fill=dev_fg, font=F['base'], width=w - 2 * g)
+            y = cv.bbox(t)[3]
+        y += g
+        bh = line + px(6)
+        for row in self.PAD_BUTTONS:
+            bw = (w - 2 * g - px(2) * (len(row) - 1)) / len(row)
+            for k, (b, text) in enumerate(row):
+                x0 = g + k * (bw + px(2))
+                lit = b in ('mono', 'lo', 'fit') and getattr(s, b)
+                cv.create_rectangle(x0, y, x0 + bw, y + bh, width=0, fill=ACCENT if lit else RAISED,
+                                    tags=(f'b:{b}', 'btn', 'face', 'lit' if lit else 'off'))
+                cv.create_text(x0 + bw / 2, y + bh / 2, text=text, fill='#111' if lit else TEXT, font=F['base'],
+                               tags=(f'b:{b}', 'btn'))
+            y += bh + px(2)
+        h = round(y + g)
+        sel = i == self.sel
+        cv.create_rectangle(0, 0, w - 1, h - 1, outline=ACCENT if sel else LINE, width=px(2) if sel else 1, tags='sel')
+        if int(cv.cget('height')) != h:
+            cv.config(height=h)
+
+    def pad_click(self, i, e):
+        """A click on pad i: its buttons, the header (TR-8S color), the ✕, or anywhere else = select and play."""
+        tags = e.widget.gettags('current')
+        act = next((t[2:] for t in tags if t.startswith('b:')), None)
+        if act == 'clear':
+            self.clear(i)
+        elif act == 'play':
+            self.play(i)
+        elif act == 'edit':
+            self.edit(i)
+        elif act:
+            self.toggle(i, act)
+        elif 'head' in tags:
+            self.pick_color(i, e)
+        else:
+            self.select(i)
+            self.play(i)
+
+    @staticmethod
+    def pad_hover(cv, on):
+        b = next((t for t in cv.gettags('current') if t.startswith('b:')), None)
+        for item in cv.find_withtag(b) if b else ():
+            if 'face' in cv.gettags(item) and 'off' in cv.gettags(item):
+                cv.itemconfig(item, fill=HOVER if on else RAISED)
 
     def refresh(self):
         total = ram = 0
         for i, (s, p) in enumerate(zip(self.slots, self.pads)):
-            color = self.meta['colors'][i]
-            put(p['head'], text=f'{KEYS[i]}   {t8k.SLOTS[i]}   ·   {t8k.COLORS[color]}', bg=HEX[color])
-            put(p['x'], bg=HEX[color], activebackground=HEX[color])
-            put(p['bar'], bg=HEX[color])
-            self.draw_pad(i)
-            for k in ('mono', 'lo', 'fit'):
-                light(p[k], getattr(s, k))
             if s.audio is not None:
                 b = s.nbytes()
                 total += b
                 ram += lib.cost(b)
                 ch = 'M' if s.mono or s.audio.shape[1] == 1 else 'ST'
                 blocks = lib.cost(b) // lib.BLOCK_BYTES
-                put(p['name'], text=s.name.upper())
-                put(p['info'], fg=WARN if b > SLOT_MAX else DIM,
-                    text=f'{s.type} · {s.length() / RATE:.2f}s · {ch}\n{b // 1024} KB · {blocks} '
-                         f'block{"s" if blocks > 1 else ""} ({lib.cost(b) / lib.BYTES_PER_SECOND:.1f} s)')
-                text, fg = self.device_text(s, short=True)
-                put(p['dev'], text=text, fg=fg)
+                p['texts'] = (s.name.upper(), f'{s.type} · {s.length() / RATE:.2f}s · {ch}\n{b // 1024} KB · {blocks} '
+                              f'block{"s" if blocks > 1 else ""} ({lib.cost(b) / lib.BYTES_PER_SECOND:.1f} s)',
+                              WARN if b > SLOT_MAX else DIM, *self.device_text(s, short=True))
             else:
-                put(p['dev'], text='')
-                put(p['name'], text=s.name or '— empty —')
-                put(p['info'], fg=DIM, text=(f'TR-8S sample US {s.rom - t8k.USER_TONE + 1} · no new memory\nSend by USB'
-                                            if s.rom is not None and s.rom >= t8k.USER_TONE else
-                                            'Built-in sound · no memory\n' if s.rom is not None else
-                                            f'Plays built-in {t8k.DEFAULT_ROM[i][1]}\nDrop a sample to replace'))
+                p['texts'] = (s.name or '— empty —',
+                              f'TR-8S sample US {s.rom - t8k.USER_TONE + 1} · no new memory\nSend by USB'
+                              if s.rom is not None and s.rom >= t8k.USER_TONE else
+                              'Built-in sound · no memory\n' if s.rom is not None else
+                              f'Plays built-in {t8k.DEFAULT_ROM[i][1]}\nDrop a sample to replace', DIM, '', DIM)
+            self.draw_pad(i)
         self.total['text'] = (f'This kit {total / 2 ** 20:.2f} / 12 MB   ·   '
                               f'RAM {ram / lib.BYTES_PER_SECOND:.1f} s (whole 1.49 s blocks)')
         self.total['foreground'] = WARN if total > KIT_MAX else TEXT
@@ -1472,14 +1569,20 @@ class Browser(tk.Frame):
         search.pack(fill='x')
         ttk.Label(search, text='Search').pack(side='left', padx=(0, 6))
         ttk.Entry(search, font=F['base'], textvariable=self.q).pack(side='left', fill='x', expand=True)
-        self.chips = tk.Frame(self, bg=BG)
+        self.chips = ButtonBar(self, BG, gap=px(2), font='small')
         self.chips.pack(fill='x', pady=6)
+        wrap(tk.Label(self, text='Click = preview · double-click / Enter = load into the selected pad · drag onto a '
+                                 'pad · drop folders or files here to add them. TR-8S column: green = used by a kit, '
+                                 'yellow = on the TR-8S but in no kit.',
+                      bg=BG, fg=DIM, font=F['small'], justify='left', anchor='w')).pack(side='bottom', fill='x',
+                                                                                         pady=(4, 8))
         box = tk.Frame(self, bg=BG)
         box.pack(fill='both', expand=True)
         self.tree = ttk.Treeview(box, columns=('type', 'len', 'dev'), selectmode='extended')
-        for col, text, w in (('#0', 'Sample', 130), ('type', 'Type', 62), ('len', 'Length', 56), ('dev', 'TR-8S', 96)):
+        for col, text in (('#0', 'Sample'), ('type', 'Type'), ('len', 'Length'), ('dev', 'TR-8S')):
             self.tree.heading(col, text=text, anchor='w')
-            self.tree.column(col, width=w, minwidth=40, stretch=col == '#0', anchor='w')
+            self.tree.column(col, minwidth=10, stretch=False, anchor='w')
+        self.tree.bind('<Configure>', self.fit_columns)
         self.tree.tag_configure('used', foreground=USED)
         self.tree.tag_configure('unused', foreground=UNUSED)
         bar = ttk.Scrollbar(box, command=self.tree.yview)
@@ -1493,11 +1596,21 @@ class Browser(tk.Frame):
         self.tree.bind('<ButtonRelease-1>', self.release)
         self.tree.drop_target_register(DND_FILES)
         self.tree.dnd_bind('<<Drop>>', self.drop)
-        tk.Label(self, text='Click = preview · double-click / Enter = load into selected pad · drag onto a pad · '
-                            'drop folders or files here to add them\nTR-8S column: green = used by a kit on the '
-                            'TR-8S, yellow = on the TR-8S but in no kit, empty = not on the TR-8S',
-                 bg=BG, fg=DIM, font=F['small'], wraplength=300, justify='left').pack(fill='x', pady=(4, 8))
         self.rescan()
+
+    def fit_columns(self, e):
+        """Columns never show cut-off text: when the list is narrow, whole columns are hidden (Type first, then
+        TR-8S, then Length) and the names get the rest of the width."""
+        rest, shown = e.width - px(110), []
+        for col, w in (('len', px(56)), ('dev', px(100)), ('type', px(70))):
+            if w <= rest:
+                shown.append(col)
+                rest -= w
+                self.tree.column(col, width=w)
+        cols = tuple(c for c in ('type', 'len', 'dev') if c in shown)
+        if tuple(self.tree['displaycolumns']) != cols:
+            self.tree['displaycolumns'] = cols or ('',)
+        self.tree.column('#0', width=px(110) + rest)
 
     def rescan(self):
         self.app.root.config(cursor='watch')
@@ -1519,17 +1632,15 @@ class Browser(tk.Frame):
         return {t['id']: t for t in st['tones']}, Counter(t for k in st['kits'] for t in set(k['tones']))
 
     def chips_fill(self):
-        for w in self.chips.winfo_children():
-            w.destroy()
+        self.chips.clear()
         counts = Counter(it['type'] for it in self.items)
         chips = [(None, f'All {len(self.items)}')] + [(t, f'{t} {counts[t]}') for t in lib.TYPE_NAMES if counts[t]]
         if self.app.mem.state:
             chips.append((ON_TR8S, f'On TR-8S {len(self.app.mem.state["tones"])}'))
-        for k, (t, text) in enumerate(chips):
-            b = button(self.chips, text, lambda t=t: self.pick(t), padx=4, font=F['small'])
-            b.grid(row=k // 3, column=k % 3, sticky='ew', padx=1, pady=1)
-            self.chips.columnconfigure(k % 3, weight=1)
-            light(b, t == self.type)
+        self.chips.lit = {str(self.type)}
+        for t, text in chips:
+            self.chips.add(text, lambda t=t: self.pick(t), key=str(t))
+        self.chips.lay()
 
     def pick(self, t):
         self.type = t

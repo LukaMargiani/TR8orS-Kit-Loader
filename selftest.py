@@ -322,7 +322,7 @@ ui.browser.pick(None)
 t27 = f'{app.Browser.TR8S}{ui.mem.state["tones"][0]["id"]}'
 assert ui.browser.tree.exists('d:tr8s') and ui.browser.tree.exists(t27)
 ui.assign([t27], 9)
-assert ui.slots[9].rom == ui.mem.state['tones'][0]['id'] and ui.slots[9].audio is None and 'USB' in ui.pads[9]['info']['text']
+assert ui.slots[9].rom == ui.mem.state['tones'][0]['id'] and ui.slots[9].audio is None and 'USB' in ui.pads[9]['texts'][1]
 errors = []
 app.messagebox.showerror = lambda *a, **k: errors.append(a[1])
 assert ui.build() is None and 'Send to TR-8S (USB)' in errors[-1]  # a kit file cannot point at TR-8S samples
@@ -339,6 +339,35 @@ ui.browser.roots.remove(os.path.normpath(k2))
 ui.browser.roots.remove(loose)
 ui.browser.rescan()
 ui.mem.state = None
+
+# pads and toolbars are drawn on canvases: real clicks on their drawn buttons must reach the right action
+root.deiconify()  # drawn only once the window has a real size
+root.update()
+for p_ in ui.pads:
+    p_['drawn'] = None
+ui.refresh()
+root.update()
+
+
+def click(cv, tag):
+    x0, y0, x1, y1 = cv.bbox(cv.find_withtag(tag)[0])
+    cv.event_generate('<Motion>', x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+    cv.event_generate('<Button-1>', x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+    root.update()
+
+
+ui.slots[0].set('Click', np.full((441, 1), 0.1, 'float32'))
+ui.refresh()
+root.update()
+click(ui.pads[0]['cv'], 'b:fit')
+assert ui.slots[0].fit
+click(ui.pads[0]['cv'], 'b:clear')
+assert ui.slots[0].audio is None
+size = next(i for i, it in enumerate(ui.bar.items) if it['key'] == 1.2)
+click(ui.bar, f'b:{size}')
+assert ui.zoom == 1.2
+ui.set_zoom(1.0)
+root.withdraw()
 
 # keys 1..0, - play pads; typing in a text field does not
 played = []
