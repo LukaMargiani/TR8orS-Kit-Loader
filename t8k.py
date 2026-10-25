@@ -99,7 +99,9 @@ def kit_body(name, tones, colors=DEFAULT_COLORS, kit=None):
     kit[COLOR_OFS:COLOR_OFS + 11] = bytes(colors)
     for i, t in enumerate(tones):
         o = INST_OFS + i * INST_STRIDE
-        if t >= USER_TONE and struct.unpack_from('<H', kit, o)[0] < USER_TONE:  # was a built-in sound's pad
+        # byte 4 is 00 on every working sample pad and ff on built-in ones: a sample on a pad without it is silent
+        # (hardware test); this also repairs pads sent that way before
+        if t >= USER_TONE and (struct.unpack_from('<H', kit, o)[0] < USER_TONE or kit[o + 4] != 0):
             kit[o + 2:o + INST_STRIDE] = SAMPLE_PAD
         struct.pack_into('<H', kit, o, t)
     return bytes(kit)

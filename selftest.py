@@ -32,6 +32,9 @@ assert pad(body, 0) == pad(body, 1) == t8k.SAMPLE_PAD and pad(body, 2) == bytes(
 mine = bytearray(body)
 mine[0x184 + 2] = 0x42  # the user's own setting on a sample pad
 assert pad(t8k.kit_body('x', [700] + [27] * 10, [9] * 11, bytes(mine)), 0)[0] == 0x42
+broken = bytearray(mine)
+broken[0x184 + 4] = 0xff  # a user sample on built-in settings (sent before this fix): repaired
+assert pad(t8k.kit_body('x', [700] + [27] * 10, [9] * 11, bytes(broken)), 0) == t8k.SAMPLE_PAD
 msg = usb.TR8S.__new__(usb.TR8S)
 msg.dev = 0x10
 assert msg._sysex(usb.DT1, [0x50, 0, 0, 0x13], [0]) == [0xF0, 0x41, 0x10, 0, 0, 0, 0x45, 0x12, 0x50, 0, 0, 0x13, 0,
