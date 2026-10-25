@@ -4,3 +4,4 @@ soundfile>=0.12
 tkinterdnd2>=0.4
 python-rtmidi>=1.5
 pyinstaller>=6.0
+pillow>=10.0
