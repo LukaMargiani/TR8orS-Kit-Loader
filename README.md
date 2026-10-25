@@ -350,3 +350,7 @@ and every decision were mine; Claude wrote most of the code.
 
 MIT. See [LICENSE](LICENSE). Third-party components and their licenses are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+**Logo:** the record artwork in `assets/` (`logo.png`, `icon.ico`) is © Luka Margiani, all rights reserved. It is
+**not** covered by the MIT license. You may keep it in unmodified copies and builds of this app, but do not use it for
+other projects or for a fork published under a different name.
