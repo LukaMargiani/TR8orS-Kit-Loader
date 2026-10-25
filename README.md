@@ -161,11 +161,21 @@ Click **Edit** on a pad.
 
 ![Sample editor](docs/sample-editor.png)
 
-- **S / E markers.** Drag on the waveform to move the nearest marker (S = start, E = end). The grey part is cut off.
-- **Knobs:** drag up or down, use the mouse wheel or the arrow keys, or double-click to reset.
+- **The waveform shows the result.** The untouched sample is drawn in gray, and in front of it, in the pad's color, is
+  exactly what goes to the TR-8S: fades, filters, Volume and Normalize included. You see a fade-out make the tail
+  shrink, or a high-pass filter take the low end out of a kick.
+- **S / E markers.** Drag on the waveform to move the nearest marker (S = start, E = end). The darkened parts are cut
+  off.
+- **Zoom (like Simpler).** Point at the time ruler above the waveform: the cursor becomes a magnifying glass. Click a
+  spot and drag **down to zoom in** on it, **up to zoom out**, and sideways to scroll. Double-click the ruler to see
+  the whole sample again. Use it to place the markers exactly.
+- **Knobs:** drag up or down, use the mouse wheel or the arrow keys, or double-click to reset. The name of the knob the
+  arrow keys control turns orange.
   - **Volume:** −∞ to +6 dB, default 0 dB.
-  - **Fade in / Fade out:** smooth S-curve fades, shown as the white line.
+  - **Fade in / Fade out:** smooth S-curve fades, also shown as the white line.
   - **HPF / LPF:** high-pass and low-pass filters.
+- **Filter graph** (next to the knobs): the white line is the HPF/LPF response. Gray is the sample's own frequency
+  spectrum, and the colored part is what is left after the filters.
 - **Normalize:** when on, the sample is raised to full level (peak 0 dB) before the volume knob.
 - **Trim silence:** moves the markers to where the sound starts and ends.
 - **Play** previews exactly what will go into the kit. **Reset** undoes all edits.

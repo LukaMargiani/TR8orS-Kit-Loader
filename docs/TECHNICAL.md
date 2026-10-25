@@ -109,7 +109,7 @@ F0 41 <dev> 00 00 00 45 <cmd> <addr ×4> <data…> <checksum> F7
 - **Optimize:** runs the TR-8S's own defragmentation and follows its progress.
 - While working, the app locks the TR-8S panel and shows a short message on its display.
 
-## Audio processing (`app.py`, `Slot.render`)
+## Audio processing (`app.py`, `Slot.process` and `Slot.render`)
 
 The same chain runs for the `.t8k`, the USB upload and the optional WAV copies:
 
@@ -118,6 +118,8 @@ The same chain runs for the `.t8k`, the USB upload and the optional WAV copies:
 3. **fades** (S-curve);
 4. a 3 ms **de-click** fade at any cut that does not start or end on silence;
 5. **22.05 kHz** resample, then conversion to 16-bit.
+
+The sample editor draws the output of `Slot.process` (steps 1–4), so the waveform on screen is exactly what is sent.
 
 A pad with no edits is passed through bit-exact, so the same file always produces the same audio, and it can be
 recognized on the TR-8S.

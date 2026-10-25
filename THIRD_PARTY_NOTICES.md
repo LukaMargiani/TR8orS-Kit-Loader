@@ -12,6 +12,7 @@ when these notices are passed on.
 | [SciPy](https://scipy.org/) | filters, resampling | BSD-3-Clause |
 | [soundfile](https://github.com/bastibe/python-soundfile) | reading WAV/AIFF/FLAC | BSD-3-Clause |
 | [libsndfile](https://libsndfile.github.io/libsndfile/) (bundled with soundfile) | audio file decoding | LGPL-2.1-or-later, dynamically linked; you may replace the DLL |
+| [Pillow](https://python-pillow.org/) | smooth (anti-aliased) knobs and graphs | MIT-CMU (HPND) |
 | [tkinterdnd2](https://github.com/Eliav2/tkinterdnd2) / tkdnd | drag and drop | MIT / BSD-style |
 | [python-rtmidi](https://github.com/SpotlightKid/python-rtmidi) / RtMidi | USB MIDI | MIT / RtMidi license (MIT-style) |
 | [PyInstaller](https://pyinstaller.org/) | building the `.exe` (build time only) | GPL-2.0-or-later with the bootloader exception, which allows distributing the built app under any license |

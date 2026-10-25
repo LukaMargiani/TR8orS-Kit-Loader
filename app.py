@@ -1,10 +1,12 @@
 """TR8orS-Kit-Loader: build and edit Roland TR-8S .t8k kits from WAV/AIFF/FLAC samples.
 Source sample files are only ever read; all processing is applied on export."""
 import base64
+import ctypes
 import io
 import json
 import math
 import os
+import struct
 import tempfile
 import time
 import zipfile
@@ -16,6 +18,7 @@ from tkinter import font as tkfont
 
 import numpy as np
 import soundfile as sf
+from PIL import Image, ImageDraw, ImageTk
 from scipy import signal
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
@@ -49,6 +52,8 @@ SLOT_KEYS = ('name', 'rom', 'src', 'type', 'mono', 'lo', 'fit', 'start', 'end', 
 BG, PANEL, RAISED, HOVER, FIELD, LINE = '#2b2b2b', '#363636', '#454545', '#525252', '#1e1e1e', '#1a1a1a'
 TEXT, DIM, ACCENT, WARN, WAVE_BG = '#d6d6d6', '#8f8f8f', '#ffab4a', '#ff5c5c', '#222222'
 TOOLBAR = '#1f1f1f'  # darker box for the main actions
+GHOST = '#4a4a4a'  # the untouched waveform, drawn behind the processed one
+SS = 4  # supersampling for smooth (anti-aliased) knobs and graphs
 HEX = ['#ff4b4b', '#ff9b3d', '#ffe047', '#b5e34a', '#3fd46b', '#4fd2f5',
        '#8fbfff', '#4a6cff', '#9d5cff', '#f74bd6', '#ff9ac9', '#eeeeee']
 # text sizes at 100 %; View size scales them all (named fonts change every widget at once)
@@ -56,7 +61,19 @@ FONT_SIZES = dict(base=(10, 'normal'), small=(9, 'normal'), small_bold=(9, 'bold
                   text=(11, 'normal'), heading=(12, 'bold'), title=(15, 'normal'), title_bold=(15, 'bold'),
                   mono=(11, 'normal'))
 ZOOMS = (0.8, 0.9, 1.0, 1.1, 1.2)
-PAD_W, PAD_WAVE_H = 210, 60  # pad width / waveform height at 100 %
+try:  # draw at the screen's real resolution; otherwise Windows stretches (blurs) the window above 100 % scaling
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    DPI = ctypes.windll.user32.GetDpiForSystem() / 96
+except (AttributeError, OSError):
+    DPI = 1.0
+
+
+def px(n):
+    """Pixels at 100 % Windows scaling -> pixels on this screen (text sizes in points scale by themselves)."""
+    return round(n * DPI)
+
+
+PAD_W, PAD_WAVE_H = px(210), px(60)  # pad width / waveform height at 100 %
 F = {}  # the named fonts, made by theme()
 
 # our sample types -> the TR-8S's own sample categories (its browser groups user samples by these)
@@ -223,8 +240,8 @@ class Slot:
         rate = LO_RATE if (self.lo if lo is None else lo) else RATE
         return int(self.length(lo) * rate / RATE) * self.channels() * 2
 
-    def render(self):
-        """(int16 array, sample rate) exactly as it goes to the TR-8S."""
+    def process(self):
+        """Float audio as it goes to the TR-8S, before the 22.05 kHz resample and the 16-bit conversion."""
         a = self.audio[self.start:self.end]
         if self.mono:
             a = a.mean(axis=1, keepdims=True)
@@ -245,6 +262,11 @@ class Slot:
             a = fade(a, DECLICK_MS, False)
         if self.fade_out < DECLICK_MS and (self.end < len(self.audio) or np.abs(a[-1]).max() * 32768 >= 0.5):
             a = fade(a, DECLICK_MS, True)
+        return a
+
+    def render(self):
+        """(int16 array, sample rate) exactly as it goes to the TR-8S."""
+        a = self.process()
         rate = LO_RATE if self.lo else RATE
         # x32768 (not 32767): an untouched 16-bit sample comes back bit-identical, so the TR-8S can match it
         return np.clip((resample(a, RATE, rate) * 32768).round(), -32768, 32767).astype('<i2'), rate
@@ -264,7 +286,7 @@ def theme(root, zoom=1.0):
                 darkcolor=BG, insertcolor=TEXT, font=F['base'])
     s.configure('TEntry', padding=3)
     s.configure('Dim.TLabel', foreground=DIM)
-    s.configure('Treeview', background=PANEL, fieldbackground=PANEL, foreground=TEXT, rowheight=round(22 * zoom),
+    s.configure('Treeview', background=PANEL, fieldbackground=PANEL, foreground=TEXT, rowheight=px(22 * zoom),
                 borderwidth=0)
     s.map('Treeview', background=[('selected', ACCENT)], foreground=[('selected', '#111')])
     s.configure('Treeview.Heading', background=RAISED, foreground=DIM, relief='flat', font=F['small_bold'])
@@ -304,18 +326,53 @@ def light(b, on):
     b.config(bg=ACCENT if on else RAISED, fg='#111' if on else TEXT, activebackground=ACCENT if on else HOVER)
 
 
+def wave_points(a, x0, x1, h):
+    """Outline of a's waveform (mono mix, peak per pixel column) between x0 and x1, as one polygon."""
+    m = np.clip(a.mean(axis=1), -1, 1)
+    cols = max(1, min(int(x1 - x0), len(m)))
+    edges = np.linspace(0, len(m), cols + 1).astype(int)[:-1]
+    top, bot = np.maximum.reduceat(m, edges), np.minimum.reduceat(m, edges)
+    xs, mid = x0 + np.arange(cols) * (x1 - x0) / cols, h / 2
+    return np.concatenate([np.column_stack([xs, mid - top * mid]),
+                           np.column_stack([xs[::-1], mid - bot[::-1] * mid + 1])]).ravel().tolist()
+
+
 def draw_wave(cv, a, color, tag='wave'):
     cv.delete(tag)
     w, h = cv.winfo_width(), cv.winfo_height()
-    mid = h / 2
-    cv.create_line(0, mid, w, mid, fill=LINE, tags=tag)
-    if a is None or len(a) < 2 or w < 2:
-        return
-    cols = np.array_split(a.mean(axis=1), min(w, len(a)))
-    step = w / len(cols)
-    for k, c in enumerate(cols):
-        cv.create_line(k * step, mid - c.max() * mid, k * step, mid - c.min() * mid + 1, fill=color, tags=tag)
+    cv.create_line(0, h / 2, w, h / 2, fill=LINE, tags=tag)
+    if a is not None and len(a) > 1 and w > 1:
+        cv.create_polygon(wave_points(a, 0, w, h), fill=color, outline=color, tags=tag)
     cv.tag_lower(tag)
+
+
+def magnifier_cursor():
+    """A magnifying-glass mouse cursor (Tk has none built in): written once as a Windows .cur file."""
+    path = os.path.join(tempfile.gettempdir(), 'tr8ors_zoom.cur')
+    if not os.path.exists(path):
+        y, x = np.mgrid[:32, :32]
+        d = np.hypot(x - 11, y - 11)
+        glass = ((d >= 6) & (d <= 9)) | ((abs(x - y) <= 1.5) & (x >= 17) & (x <= 26))
+        edge = np.zeros_like(glass)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                edge |= np.roll(np.roll(glass, dy, 0), dx, 1)
+        px = np.zeros((32, 32, 4), np.uint8)  # BGRA: black glass, white outline, the rest transparent
+        px[edge & ~glass] = 255
+        px[glass] = (0, 0, 0, 255)
+        mask = np.packbits(px[::-1, :, 3] == 0, axis=1).tobytes()
+        img = struct.pack('<IiiHHIIiiII', 40, 32, 64, 1, 32, 0, 0, 0, 0, 0, 0) + px[::-1].tobytes() + mask
+        with open(path, 'wb') as f:
+            f.write(struct.pack('<HHHBBBBHHII', 0, 2, 1, 32, 32, 0, 0, 11, 11, len(img), 22) + img)
+    return '@' + path.replace('\\', '/')
+
+
+def smooth(cv, width, height, paint):
+    """Draw with PIL at SS x size and shrink: Tk canvas lines and arcs are not anti-aliased."""
+    im = Image.new('RGB', (width * SS, height * SS), BG)
+    paint(ImageDraw.Draw(im))
+    cv.photo = ImageTk.PhotoImage(im.resize((width, height), Image.LANCZOS), master=cv)
+    cv.create_image(0, 0, image=cv.photo, anchor='nw')
 
 
 def fmt_time(ms):
@@ -341,11 +398,13 @@ def db_to_pos(db):
 
 class Knob(tk.Canvas):
     """Drag up/down, mouse wheel or arrow keys to turn; double-click resets."""
-    S = 62
+    S, H = px(62), px(90)  # dial size, whole height with the texts
 
     def __init__(self, parent, label, to_val, to_pos, fmt, get, put, default, color, on_change):
-        super().__init__(parent, width=self.S, height=self.S + 28, bg=BG, highlightthickness=1,
-                         highlightbackground=BG, highlightcolor=ACCENT, takefocus=1, cursor='sb_v_double_arrow')
+        super().__init__(parent, width=self.S, height=self.H, bg=BG, highlightthickness=0, takefocus=1,
+                         cursor='sb_v_double_arrow')
+        self.bind('<FocusIn>', lambda e: self.draw())  # the focused knob's name turns orange (keys turn it)
+        self.bind('<FocusOut>', lambda e: self.draw())
         self.label, self.to_val, self.to_pos, self.fmt = label, to_val, to_pos, fmt
         self.get, self.put, self.default, self.color, self.on_change = get, put, default, color, on_change
         self.bind('<Button-1>', self.press)
@@ -371,15 +430,22 @@ class Knob(tk.Canvas):
     def draw(self):
         self.delete('all')
         s, p = self.S, self.to_pos(self.get())
-        box = (12, 20, s - 12, s - 4)
-        cx, cy, r = s / 2, (box[1] + box[3]) / 2, (box[2] - box[0]) / 2
-        self.create_text(cx, 8, text=self.label, fill=DIM, font=F['small_bold'])
-        self.create_arc(*box, start=-45, extent=270, style='arc', outline=RAISED, width=4)
-        if p > 0.005:
-            self.create_arc(*box, start=225, extent=-270 * p, style='arc', outline=self.color, width=4)
-        ang = math.radians(225 - 270 * p)
-        self.create_line(cx, cy, cx + r * math.cos(ang), cy - r * math.sin(ang), fill=TEXT, width=2)
-        self.create_text(cx, s + 14, text=self.fmt(self.get()), fill=TEXT, font=F['base'])
+        cx, cy, r = s / 2 * SS, (s / 2 + px(8)) * SS, (s / 2 - px(12)) * SS
+        box = (cx - r, cy - r, cx + r, cy + r)
+
+        def paint(d):
+            inner = r - px(7) * SS
+            d.ellipse((cx - inner, cy - inner, cx + inner, cy + inner), fill=PANEL)
+            d.arc(box, 135, 405, fill=RAISED, width=px(4) * SS)
+            if p > 0.005:
+                d.arc(box, 135, 135 + 270 * p, fill=self.color, width=px(4) * SS)
+            ang = math.radians(135 + 270 * p)
+            d.line((cx, cy, cx + (r - px(2) * SS) * math.cos(ang), cy + (r - px(2) * SS) * math.sin(ang)),
+                   fill=TEXT, width=px(2) * SS)
+        smooth(self, s, s + px(8), paint)
+        self.create_text(s / 2, px(8), text=self.label, fill=ACCENT if self.focus_get() is self else DIM,
+                         font=F['small_bold'])
+        self.create_text(s / 2, self.H - px(12), text=self.fmt(self.get()), fill=TEXT, font=F['base'])
 
 
 class App:
@@ -476,13 +542,13 @@ class App:
         self.pads = []
         for i, s in enumerate(t8k.SLOTS):
             f = tk.Frame(grid, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
-            bar = tk.Frame(f)
+            bar = tk.Frame(f)  # colored with the pad in refresh(), so no light strip shows around the label
             bar.pack(fill='x')
             head = tk.Label(bar, anchor='w', padx=6, fg='#111', font=F['bold'], cursor='hand2')
             head.pack(side='left', fill='x', expand=True)
             head.bind('<Button-1>', lambda e, i=i: self.pick_color(i, e))
             x = tk.Button(bar, text='✕', command=lambda i=i: self.clear(i), relief='flat', bd=0, fg='#111',
-                          font=F['bold'], padx=6, cursor='hand2')
+                          font=F['bold'], padx=6, cursor='hand2', highlightthickness=0)
             x.pack(side='right')
             cv = tk.Canvas(f, height=round(PAD_WAVE_H * self.zoom), bg=WAVE_BG, highlightthickness=0, cursor='hand2')
             cv.pack(fill='x', padx=6, pady=(6, 4))
@@ -509,7 +575,7 @@ class App:
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind('<<Drop>>', lambda e, i=i: self.drop(e, i))
                 w.bind('<Button-1>', lambda e, i=i: (self.select(i), self.play(i)))
-            self.pads.append(dict(frame=f, head=head, x=x, cv=cv, name=name, info=info, dev=dev, **btns))
+            self.pads.append(dict(frame=f, bar=bar, head=head, x=x, cv=cv, name=name, info=info, dev=dev, **btns))
         root.drop_target_register(DND_FILES)
         root.dnd_bind('<<Drop>>', lambda e: self.drop(e, None))
         root.bind_all('<Key>', self.key)
@@ -623,6 +689,7 @@ class App:
             color = self.meta['colors'][i]
             p['head'].config(text=f'{KEYS[i]}   {t8k.SLOTS[i]}   ·   {t8k.COLORS[color]}', bg=HEX[color])
             p['x'].config(bg=HEX[color], activebackground=HEX[color])
+            p['bar'].config(bg=HEX[color])
             self.draw_pad(i)
             for k in ('mono', 'lo', 'fit'):
                 light(p[k], getattr(s, k))
@@ -1052,14 +1119,20 @@ class App:
 
 
 class Editor(tk.Toplevel):
-    """Simpler-style editor: drag the S/E markers, turn the knobs. Nothing is destructive."""
+    """Simpler-style editor: drag the S/E markers, turn the knobs. Nothing is destructive.
+    The waveform shows the result (fades, filters, Volume) over the untouched sample in gray. Dragging up/down on the
+    time ruler above it zooms around the clicked point; dragging sideways scrolls."""
+    GRAPH_W = px(210)  # filter graph width
+    FREQS = np.geomspace(20, 20000, 200)
 
     def __init__(self, app, i):
         super().__init__(app.root, bg=BG)
         self.app, self.s, self.color, self.drag = app, app.slots[i], HEX[app.meta['colors'][i]], None
+        self.v0, self.v1 = 0.0, float(len(self.s.audio))  # visible frames (zoom)
+        self.proc = self.pending = self.later = None
         self.title(f'Edit {t8k.SLOTS[i]} — {self.s.name}')
-        self.geometry('960x430')
-        self.minsize(600, 360)
+        self.geometry(f'{px(1120)}x{px(500)}')
+        self.minsize(px(760), px(400))
         tk.Frame(self, bg=self.color, height=4).pack(fill='x')
 
         top = ttk.Frame(self, padding=8)
@@ -1076,9 +1149,17 @@ class Editor(tk.Toplevel):
         self.dev.pack(side='left', fill='x', expand=True)
         self.dev_btn = button(bar, 'Use TR-8S settings', self.use_device)
 
+        try:
+            self.ruler = tk.Canvas(self, height=px(22), bg=TOOLBAR, highlightthickness=0, cursor=magnifier_cursor())
+        except tk.TclError:
+            self.ruler = tk.Canvas(self, height=px(22), bg=TOOLBAR, highlightthickness=0, cursor='sizing')
+        self.ruler.pack(fill='x', padx=8)
+        self.ruler.bind('<Button-1>', self.zoom_press)
+        self.ruler.bind('<B1-Motion>', self.zoom_drag)
+        self.ruler.bind('<Double-Button-1>', lambda e: self.zoom_to(0, len(self.s.audio)))
         self.cv = tk.Canvas(self, height=150, bg=WAVE_BG, highlightthickness=0, cursor='sb_h_double_arrow')
         self.cv.pack(fill='both', expand=True, padx=8)
-        self.cv.bind('<Configure>', lambda e: (draw_wave(self.cv, self.s.audio, self.color), self.overlay()))
+        self.cv.bind('<Configure>', lambda e: self.schedule())
         self.cv.bind('<Button-1>', self.press)
         self.cv.bind('<B1-Motion>', self.motion)
 
@@ -1095,59 +1176,164 @@ class Editor(tk.Toplevel):
                      default=default, color=self.color, on_change=self.changed, **kw)
             k.pack(side='left', padx=(0, 14))
             self.knobs.append(k)
+        self.graph = tk.Canvas(ctl, width=self.GRAPH_W, height=Knob.H, bg=BG, highlightthickness=0)
+        self.graph.pack(side='left')
+        # the sample's own spectrum (gray), so the graph shows what the filters take away
+        m = self.s.audio[:RATE * 10].mean(axis=1)
+        f, psd = signal.welch(m, RATE, nperseg=min(4096, len(m)))
+        db = 10 * np.log10(np.interp(self.FREQS, f, psd) + 1e-12)
+        self.spectrum = db - db.max()
         for text, cmd in [('Reset', self.reset), ('Trim silence', self.trim), ('▶ Play', self.play)]:
             button(ctl, text, cmd, padx=12, pady=4).pack(side='right', padx=(6, 0))
         self.norm = button(ctl, 'Normalize', self.toggle_norm, padx=12, pady=4)
         self.norm.pack(side='right', padx=(6, 0))
         light(self.norm, self.s.norm)
-        ttk.Label(self, padding=(10, 0, 10, 8), style='Dim.TLabel',
-                  text='Drag on the waveform to move the nearest marker (S = start, E = end). Knobs: drag up/down, '
-                       'wheel or arrow keys · double-click resets. Normalize = peak to 0 dB, before Volume.').pack(anchor='w')
+        wrap(ttk.Label(self, padding=(10, 0, 10, 8), style='Dim.TLabel',
+                  text='Drag on the waveform to move the nearest marker (S = start, E = end). Drag up/down on the '
+                       'time ruler to zoom, sideways to scroll, double-click it to see all. Knobs: drag up/down, '
+                       'wheel or arrow keys · double-click resets. Normalize = peak to 0 dB, before Volume.')
+             ).pack(fill='x')
         self.update_device()
         self.grab_set()
 
+    # ---- view: frames <-> pixels through the zoom window ----
+
     def f2x(self, f):
-        return f / len(self.s.audio) * self.cv.winfo_width()
+        return (f - self.v0) / (self.v1 - self.v0) * self.cv.winfo_width()
+
+    def x2f(self, x):
+        return self.v0 + max(0.0, min(1.0, x / max(1, self.cv.winfo_width()))) * (self.v1 - self.v0)
+
+    def zoom_press(self, e):
+        self.z0 = e.x, e.y, self.x2f(e.x), self.v1 - self.v0
+
+    def zoom_drag(self, e):
+        """Like Simpler: drag down = zoom in around the clicked point, up = out; sideways scrolls."""
+        x0, y0, anchor, span0 = self.z0
+        span = min(len(self.s.audio), max(64.0, span0 * 2 ** ((y0 - e.y) / 50)))
+        v0 = anchor - e.x / max(1, self.cv.winfo_width()) * span
+        self.zoom_to(v0, v0 + span)
+
+    def zoom_to(self, v0, v1):
+        n, span = len(self.s.audio), v1 - v0
+        self.v0 = max(0.0, min(n - span, v0))
+        self.v1 = self.v0 + span
+        self.schedule()
+
+    # ---- markers ----
 
     def press(self, e):
         self.drag = 'start' if abs(e.x - self.f2x(self.s.start)) <= abs(e.x - self.f2x(self.s.end)) else 'end'
         self.motion(e)
 
     def motion(self, e):
-        n = len(self.s.audio)
-        f = int(max(0.0, min(1.0, e.x / max(1, self.cv.winfo_width()))) * n)
+        f = int(self.x2f(e.x))
         if self.drag == 'start':
             self.s.start = min(f, self.s.end - 2)
         else:
             self.s.end = max(f, self.s.start + 2)
         self.changed()
 
-    def overlay(self):
+    # ---- drawing: bursts of mouse events become one redraw ----
+
+    def schedule(self):
+        if not self.pending:
+            self.pending = self.after_idle(self.redraw)
+
+    def redraw(self):
+        self.pending = None
+        if not self.winfo_exists():
+            return
         cv, s = self.cv, self.s
-        cv.delete('ov')
+        cv.delete('all')
         w, h = cv.winfo_width(), cv.winfo_height()
+        cv.create_line(0, h / 2, w, h / 2, fill=LINE)
+        i0, i1 = int(self.v0), min(len(s.audio), int(math.ceil(self.v1)) + 1)
+        if i1 - i0 > 1:
+            cv.create_polygon(wave_points(s.audio[i0:i1], self.f2x(i0), self.f2x(i1), h), fill=GHOST, outline=GHOST)
+        if self.proc is None:
+            self.proc = s.process()
+        a0, a1 = max(i0, s.start), min(i1, s.start + len(self.proc))  # the result, where it is in view
+        if a1 - a0 > 1:
+            cv.create_polygon(wave_points(self.proc[a0 - s.start:a1 - s.start], self.f2x(a0), self.f2x(a1), h),
+                              fill=self.color, outline=self.color)
         xs, xe = self.f2x(s.start), self.f2x(s.end)
         for x0, x1 in ((0, xs), (xe, w)):
             if x1 > x0:
-                cv.create_rectangle(x0, 0, x1, h, fill=LINE, stipple='gray50', outline='', tags='ov')
+                cv.create_rectangle(max(0, x0), 0, min(w, x1), h, fill=LINE, stipple='gray50', outline='')
         end = s.start + s.length()
         fi, fo = int(s.fade_in * RATE / 1000), int(s.fade_out * RATE / 1000)
         cv.create_line(xs, h, self.f2x(min(s.start + fi, end)), 2, self.f2x(max(end - fo, s.start)), 2,
-                       self.f2x(end), h, fill=TEXT, width=2, tags='ov')
+                       self.f2x(end), h, fill=TEXT, width=1)
         if end < s.end:
-            cv.create_line(self.f2x(end), 0, self.f2x(end), h, fill=ACCENT, dash=(4, 3), tags='ov')
-            cv.create_text(self.f2x(end) + 4, h - 10, text='FIT (1 block)', anchor='w', fill=ACCENT, font=F['base'],
-                           tags='ov')
+            cv.create_line(self.f2x(end), 0, self.f2x(end), h, fill=ACCENT, dash=(4, 3))
+            cv.create_text(self.f2x(end) + 4, h - 10, text='FIT (1 block)', anchor='w', fill=ACCENT, font=F['base'])
         for x, t, side in ((xs, 'S', 1), (xe, 'E', -1)):
-            cv.create_line(x, 0, x, h, fill=ACCENT, width=2, tags='ov')
-            cv.create_polygon(x, 0, x + 14 * side, 0, x + 14 * side, 14, x, 20, fill=ACCENT, outline='', tags='ov')
-            cv.create_text(x + 7 * side, 7, text=t, fill='#111', font=F['small_bold'], tags='ov')
+            cv.create_line(x, 0, x, h, fill=ACCENT, width=2)
+            cv.create_polygon(x, 0, x + 14 * side, 0, x + 14 * side, 14, x, 20, fill=ACCENT, outline='')
+            cv.create_text(x + 7 * side, 7, text=t, fill='#111', font=F['small_bold'])
         b = s.nbytes()
         self.info['text'] = (f'{s.length() / RATE:.3f}s of {len(s.audio) / RATE:.3f}s  ·  {b // 1024} KB  ·  '
                              f'{lib.cost(b) // lib.BLOCK_BYTES} block(s) on the TR-8S')
+        self.draw_ruler()
+        self.draw_filter()
+
+    def draw_ruler(self):
+        r, w = self.ruler, self.cv.winfo_width()
+        r.delete('all')
+        span_ms = (self.v1 - self.v0) / RATE * 1000
+        step = next((t for t in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000)
+                     if t / span_ms * w >= 70), 60000)
+        t = math.ceil(self.v0 / RATE * 1000 / step) * step
+        while t <= self.v1 / RATE * 1000:
+            x = self.f2x(t * RATE / 1000)
+            r.create_line(x, 14, x, 22, fill=DIM)
+            r.create_text(x + 3, 9, text=fmt_time(t) if t else '0', anchor='w', fill=DIM, font=F['small'])
+            t += step
+        zoomed = self.v1 - self.v0 < len(self.s.audio) - 1
+        hint = r.create_text(w - 6, px(11), anchor='e', fill=ACCENT if zoomed else DIM, font=F['small'],
+                             text=f'zoom {len(self.s.audio) / (self.v1 - self.v0):.0f}x · double-click: all' if zoomed
+                             else 'drag up/down here to zoom')
+        r.tag_lower(r.create_rectangle(r.bbox(hint)[0] - 10, 0, w, px(22), fill=TOOLBAR, outline=''), hint)
+
+    def draw_filter(self):
+        """HPF/LPF response (white) over the sample's spectrum: gray = before, color = after the filters."""
+        g, s, W, H = self.graph, self.s, self.GRAPH_W, Knob.H
+        g.delete('all')
+        resp = np.zeros_like(self.FREQS)
+        for on, kind, hz in ((s.hpf > HPF_OFF, 'highpass', s.hpf), (s.lpf < LPF_OFF, 'lowpass', s.lpf)):
+            if on:
+                _, hr = signal.sosfreqz(signal.butter(4, hz, kind, fs=RATE, output='sos'), self.FREQS, fs=RATE)
+                resp += 20 * np.log10(np.abs(hr) + 1e-9)
+        top, bot = px(18), H - px(16)
+        xs = np.linspace(0, W, len(self.FREQS)) * SS
+
+        def ys(db):
+            return (top + (3 - np.clip(db, -60, 3)) / 63 * (bot - top)) * SS
+
+        def paint(d):
+            d.rectangle((0, top * SS, W * SS, bot * SS), fill=WAVE_BG)
+            for hz in (100, 1000, 10000):
+                x = math.log(hz / 20, 1000) * W * SS
+                d.line((x, top * SS, x, bot * SS), fill=LINE, width=SS)
+            for db, color in ((self.spectrum, GHOST), (self.spectrum + resp, self.color)):
+                d.polygon(list(zip(xs, ys(db))) + [(W * SS, bot * SS), (0, bot * SS)], fill=color)
+            d.line(list(zip(xs, ys(resp))), fill=TEXT, width=2 * SS, joint='curve')
+        smooth(g, W, H, paint)
+        g.create_text(W / 2, px(8), text='FILTER', fill=DIM, font=F['small_bold'])
+        for hz, label in ((100, '100'), (1000, '1k'), (10000, '10k')):
+            g.create_text(math.log(hz / 20, 1000) * W, H - px(7), text=label, fill=DIM, font=F['small'])
 
     def changed(self):
-        self.overlay()
+        """Redraw now; the main window and the TR-8S check follow once the mouse rests (they are slower)."""
+        self.proc = None
+        self.schedule()
+        if self.later:
+            self.after_cancel(self.later)
+        self.later = self.after(150, self.settle)
+
+    def settle(self):
+        self.later = None
         self.app.refresh()
         self.update_device()
 
@@ -1337,7 +1523,7 @@ def rules(parent):
     """The TR-8S rules: everything about its memory, slots and imports in one readable window."""
     top = tk.Toplevel(parent, bg=BG, padx=12, pady=12)
     top.title('TR-8S rules')
-    top.geometry('620x640')
+    top.geometry(f'{px(620)}x{px(640)}')
     text = tk.Text(top, bg=PANEL, fg=TEXT, wrap='word', relief='flat', padx=14, pady=10, font=F['text'],
                    spacing1=2, spacing3=2, highlightthickness=0)
     bar = ttk.Scrollbar(top, command=text.yview)
@@ -1394,7 +1580,7 @@ def pick_slot(parent, state, name):
     tones = {t['id'] for t in state['tones']}
     top = tk.Toplevel(parent, bg=BG, padx=12, pady=12)
     top.title('Send to TR-8S: pick a kit slot')
-    top.geometry('440x520')
+    top.geometry(f'{px(440)}x{px(520)}')
     top.grab_set()
     tk.Label(top, bg=BG, fg=TEXT, font=F['base'], justify='left', wraplength=410,
              text=f'Which kit slot should "{name}" go into? The kit now in that slot is replaced (its samples stay '
@@ -1434,7 +1620,7 @@ def details(app):
     """TR-8S memory window: what is on the machine (read live over USB) and tools to clean it up."""
     top = tk.Toplevel(app.root, bg=BG, padx=12, pady=12)
     top.title('TR-8S memory')
-    top.geometry('760x820')
+    top.geometry(f'{px(760)}x{px(820)}')
     tk.Label(top, bg=BG, fg=DIM, justify='left', wraplength=670, font=F['base'],
              text=f'The TR-8S keeps every imported sample in one shared memory: {lib.DEVICE_SECONDS:.0f} s (mono, '
                   f'44.1 kHz) and {lib.DEVICE_SAMPLES} samples for all {lib.DEVICE_KITS} kits. Every sample takes '
