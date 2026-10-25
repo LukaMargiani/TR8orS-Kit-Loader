@@ -311,11 +311,33 @@ ui.assign([kick], 1)  # loading the file again takes the settings it has on the 
 assert popups and 'Already on the TR-8S' in popups[-1] and 'US 27' in popups[-1] and 'near-duplicate' in popups[-1]
 app.messagebox.showinfo = lambda *a, **k: None
 assert ui.slots[1].end == 3000 and ui.slots[1].fade_out == 20.0 and ui.device_text(ui.slots[1])[1] == app.ACCENT
-assert ui.browser.on_device(kick) == 'US 27' and ui.browser.on_device(os.path.join(pack, 'Kicks', 'k2.wav')) == ''
+ui.browser.fill()
+k2 = os.path.join(pack, 'Kicks', 'k2.wav')
+assert ui.browser.tree.set(kick, 'dev').startswith('US 27 · ') and ui.browser.tree.set(k2, 'dev') == ''
 ui.browser.chips_fill()
 ui.browser.pick(app.ON_TR8S)
 assert ui.browser.tree.exists(kick) and not ui.browser.tree.exists(os.path.join(pack, 'Kicks', 'k2.wav'))
 ui.browser.pick(None)
+# library: the TR-8S folder lists every sample on it; a pad can use one as it is (USB only, no new memory)
+t27 = f'{app.Browser.TR8S}{ui.mem.state["tones"][0]["id"]}'
+assert ui.browser.tree.exists('d:tr8s') and ui.browser.tree.exists(t27)
+ui.assign([t27], 9)
+assert ui.slots[9].rom == ui.mem.state['tones'][0]['id'] and ui.slots[9].audio is None and 'USB' in ui.pads[9]['info']['text']
+errors = []
+app.messagebox.showerror = lambda *a, **k: errors.append(a[1])
+assert ui.build() is None and 'Send to TR-8S (USB)' in errors[-1]  # a kit file cannot point at TR-8S samples
+app.messagebox.showerror = lambda *a, **k: None
+ui.slots[9].clear()
+# library: single files can be added (e.g. dropped), and are listed at the top level
+ui.browser.add_roots([k2])  # already in a pack: still listed once, in its pack
+assert len([it for it in ui.browser.items if it['path'] == k2]) == 1
+loose = os.path.join(tmp, 'loose.wav')
+app.sf.write(loose, np.full((441, 1), 0.1, 'float32'), 44100)
+ui.browser.add_roots([loose, loose])
+assert ui.browser.roots.count(loose) == 1 and loose in ui.browser.tree.get_children('')
+ui.browser.roots.remove(os.path.normpath(k2))
+ui.browser.roots.remove(loose)
+ui.browser.rescan()
 ui.mem.state = None
 
 # keys 1..0, - play pads; typing in a text field does not

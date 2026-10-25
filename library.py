@@ -53,9 +53,11 @@ def categorize(path):
 
 
 def scan(root):
-    """Every audio file under root: dicts with path, rel (path inside the pack), type and length in seconds."""
+    """Every audio file under root (a folder, or a single file): dicts with path, rel (path inside the pack), type
+    and length in seconds."""
     out = []
-    for d, dirs, files in os.walk(root):
+    walk = [(os.path.dirname(root), [], [os.path.basename(root)])] if os.path.isfile(root) else os.walk(root)
+    for d, dirs, files in walk:
         dirs.sort()
         for f in sorted(files):
             if f.lower().endswith(EXTS) and not f.startswith('._'):
@@ -64,7 +66,8 @@ def scan(root):
                     secs = sf.info(p).duration
                 except RuntimeError:
                     continue  # unreadable/corrupt file: leave it out of the library
-                out.append(dict(path=p, rel=os.path.relpath(p, root), type=categorize(p), secs=secs))
+                out.append(dict(path=p, rel=os.path.relpath(p, os.path.dirname(root) if p == root else root),
+                                type=categorize(p), secs=secs))
     return out
 
 
@@ -110,10 +113,11 @@ class Uploads:
 
     def on_device(self, src, state):
         """Versions of `src` that are still on the TR-8S (all remembered ones if it was never read)."""
-        if not src:
+        versions = self.files.get(self.key(src)) if src else None
+        if not versions:  # most library files were never sent: skip building the lookup for them
             return []
         tones = {t['id']: t for t in state['tones']} if state else None
-        return [v for v in self.files.get(self.key(src), [])
+        return [v for v in versions
                 if tones is None or (v['id'] in tones and all(tones[v['id']][k] == v[k] for k in
                                                               ('name', 'size', 'channels')))]
 
