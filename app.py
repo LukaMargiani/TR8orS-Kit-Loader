@@ -28,6 +28,7 @@ import library as lib
 import t8k
 
 APP = 'TR8orS-Kit-Loader'
+VERSION = 'x2V1.1.0'  # the GitHub release tag
 RATE, LO_RATE = t8k.RATE, 22050
 SLOT_MAX, KIT_MAX = 4 << 20, 12 << 20
 EXTS = lib.EXTS
@@ -406,8 +407,8 @@ def put(w, **kw):
 
 
 class Legend(tk.Text):
-    """Wrapping text whose color words show their color: {green} and {yellow} as text in that color, {orange} like a
-    lit (orange) button. Read-only; as many lines tall as the text needs at the current width."""
+    """Wrapping text whose color words show their color: {green}, {yellow} and {orange-text} as text in that color,
+    {orange} like a lit (orange) button. Read-only; as many lines tall as the text needs at the current width."""
 
     def __init__(self, parent, bg, fg=DIM, font='base', text=''):
         super().__init__(parent, bg=bg, fg=fg, font=F[font], wrap='word', relief='flat', bd=0, highlightthickness=0,
@@ -415,14 +416,17 @@ class Legend(tk.Text):
         self.tag_configure('green', foreground=USED)
         self.tag_configure('yellow', foreground=UNUSED)
         self.tag_configure('orange', background=ACCENT, foreground='#111')
+        self.tag_configure('orange-text', foreground=ACCENT)
         self.bind('<Configure>', lambda e: self.fit())
         self.show(text)
 
     def show(self, text, fg=None):
         self.config(state='normal', **({'fg': fg} if fg else {}))
         self.delete('1.0', 'end')
-        for k, part in enumerate(re.split(r'\{(green|yellow|orange)\}', text)):
-            self.insert('end', part if k % 2 == 0 else f'\u2009{part}\u2009', () if k % 2 == 0 else (part,))
+        for k, part in enumerate(re.split(r'\{(green|yellow|orange|orange-text)\}', text)):
+            word = part.split('-')[0]
+            self.insert('end', part if k % 2 == 0 else f'\u2009{word}\u2009' if part == 'orange' else word,
+                        () if k % 2 == 0 else (part,))
         self.config(state='disabled')
         self.fit()
 
@@ -572,7 +576,7 @@ class App:
         self.mem = lib.Snapshot(MEMORY)
         self.uploads = lib.Uploads(UPLOADS)
         self.zoom = cfg.get('zoom', 1.0) if cfg.get('zoom') in ZOOMS else 1.0
-        root.title(APP)
+        root.title(f'{APP} {VERSION}')
         try:  # own taskbar entry with our icon (not Python's) when run as a script
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP)
         except (AttributeError, OSError):
@@ -592,6 +596,7 @@ class App:
         bar.add(image=self.logo_image())
         bar.add('TR8orS', fg=ACCENT, font='title_bold', gap=px(8))
         bar.add('KIT LOADER', fg=DIM, font='title', gap=px(4))
+        bar.add(VERSION, fg=DIM, font='small', gap=px(6))
         for k, (text, cmd) in enumerate([('New kit', self.new), ('Open…', self.open), ('Load folder…', self.load_folder),
                           ('Save project…', self.save_project), ('Save .t8k…', self.save),
                           ('Send to TR-8S (USB)…', self.send_usb), ('Export to SD card', self.export_sd),
@@ -891,7 +896,7 @@ class App:
         self.mem_text.show(fg=WARN if over else TEXT,
                            text=f'{used / lib.BYTES_PER_SECOND:.1f} / {lib.DEVICE_SECONDS:.0f} s   ·   {count} / '
                                   f'{lib.DEVICE_SAMPLES} samples   ·   {kits} / {lib.DEVICE_KITS} kits   ·   '
-                                  f'this kit adds {add / lib.BYTES_PER_SECOND:.1f} s ({{orange}})   ·   {read}')
+                                  f'this kit adds {add / lib.BYTES_PER_SECOND:.1f} s ({{orange-text}})   ·   {read}')
         self.dirty = True
 
     def device_status(self, s):
