@@ -1,4 +1,6 @@
-# TR8orS Kit Loader
+<p align="center"><img src="assets/logo.png" width="160" alt="TR8orS Kit Loader logo"></p>
+
+<h1 align="center">TR8orS Kit Loader</h1>
 
 A free, open-source Windows app for building sample kits for the **Roland TR-8S**.
 
@@ -336,6 +338,7 @@ python selftest.py path\to\exported-kit.t8k
 | `tr8s_usb.py` | Talking to the TR-8S over USB MIDI (SysEx) |
 | `library.py` | Sample library scan, type detection and memory accounting |
 | `selftest.py` | End-to-end tests without hardware |
+| `assets/` | The logo (`logo.png`) and the app icon (`icon.ico`) |
 | `docs/TECHNICAL.md` | The file format, the USB protocol and the hardware findings |
 
 ## How this was made
@@ -347,3 +350,7 @@ and every decision were mine; Claude wrote most of the code.
 
 MIT. See [LICENSE](LICENSE). Third-party components and their licenses are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+**Logo:** the record artwork in `assets/` (`logo.png`, `icon.ico`) is © Luka Margiani, all rights reserved. It is
+**not** covered by the MIT license. You may keep it in unmodified copies and builds of this app, but do not use it for
+other projects or for a fork published under a different name.

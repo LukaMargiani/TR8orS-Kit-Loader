@@ -7,6 +7,7 @@ import json
 import math
 import os
 import struct
+import sys
 import tempfile
 import time
 import zipfile
@@ -75,6 +76,8 @@ def px(n):
 
 PAD_W, PAD_WAVE_H = px(210), px(60)  # pad width / waveform height at 100 %
 F = {}  # the named fonts, made by theme()
+# logo and icon: next to app.py, or unpacked by PyInstaller into sys._MEIPASS for the .exe
+ASSETS = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'assets')
 
 # our sample types -> the TR-8S's own sample categories (its browser groups user samples by these)
 TR8S_CATEGORY = {k: t8k.CATEGORIES.index(v) for k, v in dict(
@@ -462,6 +465,12 @@ class App:
         self.uploads = lib.Uploads(UPLOADS)
         self.zoom = cfg.get('zoom', 1.0) if cfg.get('zoom') in ZOOMS else 1.0
         root.title(APP)
+        try:  # own taskbar entry with our icon (not Python's) when run as a script
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP)
+        except (AttributeError, OSError):
+            pass
+        root.iconbitmap(default=os.path.join(ASSETS, 'icon.ico'))  # every window of the app
+        self.logo_src = Image.open(os.path.join(ASSETS, 'logo.png'))
         root.geometry(cfg.get('geometry', '1560x900'))
         root.minsize(640, 480)
         root.protocol('WM_DELETE_WINDOW', self.quit)
@@ -473,6 +482,8 @@ class App:
         bar = tk.Frame(box, bg=TOOLBAR, height=40)
         bar.pack(fill='x', padx=8, pady=8)
         logo = tk.Frame(bar, bg=TOOLBAR)
+        self.logo = tk.Label(logo, bg=TOOLBAR)
+        self.logo.pack(side='left', padx=(0, 8))
         tk.Label(logo, text='TR8orS', bg=TOOLBAR, fg=ACCENT, font=F['title_bold']).pack(side='left')
         tk.Label(logo, text='KIT LOADER', bg=TOOLBAR, fg=DIM, font=F['title']).pack(side='left', padx=(4, 12))
         for text, cmd in [('New kit', self.new), ('Open…', self.open), ('Load folder…', self.load_folder),
@@ -586,6 +597,7 @@ class App:
              ).pack(side='bottom', fill='x', pady=(0, 6), before=scroller)  # packed first: never squeezed out
         self.sel = 0
         self.light_size()
+        self.size_logo()
         self.refresh()
         self.dirty = False
 
@@ -621,8 +633,15 @@ class App:
         self.cols = 0
         self.reflow()
         self.light_size()
+        self.size_logo()
         self.root.after(50, self.relayout_bar)
         self.refresh()
+
+    def size_logo(self):
+        """The record logo in the toolbar, a little taller than the title row at this view size, so its colors read on the dark toolbar."""
+        size = px(46 * self.zoom)
+        self.logo_img = ImageTk.PhotoImage(self.logo_src.resize((size, size), Image.LANCZOS), master=self.root)
+        self.logo.config(image=self.logo_img)
 
     def light_size(self):
         for z, b in self.size_btns.items():
