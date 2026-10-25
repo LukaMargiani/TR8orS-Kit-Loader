@@ -1,0 +1,6 @@
+numpy>=1.26
+scipy>=1.11
+soundfile>=0.12
+tkinterdnd2>=0.4
+python-rtmidi>=1.5
+pyinstaller>=6.0
