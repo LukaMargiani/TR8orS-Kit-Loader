@@ -28,6 +28,7 @@ memory you are using, so kits never fail to load because the memory is full.
 - [Keyboard and mouse](#keyboard-and-mouse)
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
+- [How this was made](#how-this-was-made)
 - [License](#license)
 
 ---
@@ -336,6 +337,11 @@ python selftest.py path\to\exported-kit.t8k
 | `library.py` | Sample library scan, type detection and memory accounting |
 | `selftest.py` | End-to-end tests without hardware |
 | `docs/TECHNICAL.md` | The file format, the USB protocol and the hardware findings |
+
+## How this was made
+
+TR8orS Kit Loader was vibe-coded with [Claude](https://claude.com/claude-code). The design, testing on real hardware
+and every decision were mine; Claude wrote most of the code.
 
 ## License
 
