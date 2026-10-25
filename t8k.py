@@ -33,6 +33,11 @@ DEFAULT_ROM = [(27, '909 Bass2'), (31, '909 Snare2'), (33, '909 Low Tom'), (34, 
 BLOCK = 0x20000
 BASE = 0x00D00000   # first user sample address in TR-8S memory; the TR-8S places imported samples itself
 DEVID = bytes(12)   # 12-byte source id in kit files; neutral (the TR-8S re-assigns everything on import)
+# a pad record after its tone id, as the TR-8S exports it for a pad playing a user sample (all 11 pads of a kit
+# exported by the TR-8S). A built-in sound's record lacks these sample settings: with a user sample on it the pad
+# stays silent (hardware test, kit sent over USB).
+SAMPLE_PAD = bytes.fromhex('807f005180000001018000000000000000000000000000000000'
+                           '18c832000001000100ff0000200000000000000000000000')
 
 
 def _name(s):
@@ -93,7 +98,12 @@ def kit_body(name, tones, colors=DEFAULT_COLORS, kit=None):
     kit[:16] = _name(name)
     kit[COLOR_OFS:COLOR_OFS + 11] = bytes(colors)
     for i, t in enumerate(tones):
-        struct.pack_into('<H', kit, INST_OFS + i * INST_STRIDE, t)
+        o = INST_OFS + i * INST_STRIDE
+        # byte 4 is 00 on every working sample pad and ff on built-in ones: a sample on a pad without it is silent
+        # (hardware test); this also repairs pads sent that way before
+        if t >= USER_TONE and (struct.unpack_from('<H', kit, o)[0] < USER_TONE or kit[o + 4] != 0):
+            kit[o + 2:o + INST_STRIDE] = SAMPLE_PAD
+        struct.pack_into('<H', kit, o, t)
     return bytes(kit)
 
 

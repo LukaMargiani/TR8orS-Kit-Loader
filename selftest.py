@@ -25,6 +25,16 @@ assert usb.unpack7(usb.pack7(list(blob))) == blob and usb.pack7([0x80, 1, 0xff])
 # the kit data sent over USB is the .t8k KIT data with the pad tone ids, colors and name filled in
 body = t8k.kit_body('usb kit', [624, 635] + [27] * 9, [9] * 11, bytes(1312))
 assert len(body) == 1312 and body[:7] == b'USB KIT' and body[0x184:0x186] == (624).to_bytes(2, 'little')
+# a user sample on a pad that was a built-in sound's gets the TR-8S's sample settings (else it is silent);
+# built-in pads and pads that already held a sample (with the user's own settings) keep theirs
+pad = lambda k, i: k[0x184 + i * 0x34 + 2:0x184 + (i + 1) * 0x34]
+assert pad(body, 0) == pad(body, 1) == t8k.SAMPLE_PAD and pad(body, 2) == bytes(50)
+mine = bytearray(body)
+mine[0x184 + 2] = 0x42  # the user's own setting on a sample pad
+assert pad(t8k.kit_body('x', [700] + [27] * 10, [9] * 11, bytes(mine)), 0)[0] == 0x42
+broken = bytearray(mine)
+broken[0x184 + 4] = 0xff  # a user sample on built-in settings (sent before this fix): repaired
+assert pad(t8k.kit_body('x', [700] + [27] * 10, [9] * 11, bytes(broken)), 0) == t8k.SAMPLE_PAD
 msg = usb.TR8S.__new__(usb.TR8S)
 msg.dev = 0x10
 assert msg._sysex(usb.DT1, [0x50, 0, 0, 0x13], [0]) == [0xF0, 0x41, 0x10, 0, 0, 0, 0x45, 0x12, 0x50, 0, 0, 0x13, 0,
@@ -311,12 +321,63 @@ ui.assign([kick], 1)  # loading the file again takes the settings it has on the 
 assert popups and 'Already on the TR-8S' in popups[-1] and 'US 27' in popups[-1] and 'near-duplicate' in popups[-1]
 app.messagebox.showinfo = lambda *a, **k: None
 assert ui.slots[1].end == 3000 and ui.slots[1].fade_out == 20.0 and ui.device_text(ui.slots[1])[1] == app.ACCENT
-assert ui.browser.on_device(kick) == 'US 27' and ui.browser.on_device(os.path.join(pack, 'Kicks', 'k2.wav')) == ''
+ui.browser.fill()
+k2 = os.path.join(pack, 'Kicks', 'k2.wav')
+assert ui.browser.tree.set(kick, 'dev').startswith('US 27 · ') and ui.browser.tree.set(k2, 'dev') == ''
 ui.browser.chips_fill()
 ui.browser.pick(app.ON_TR8S)
 assert ui.browser.tree.exists(kick) and not ui.browser.tree.exists(os.path.join(pack, 'Kicks', 'k2.wav'))
 ui.browser.pick(None)
+# library: the TR-8S folder lists every sample on it; a pad can use one as it is (USB only, no new memory)
+t27 = f'{app.Browser.TR8S}{ui.mem.state["tones"][0]["id"]}'
+assert ui.browser.tree.exists('d:tr8s') and ui.browser.tree.exists(t27)
+ui.assign([t27], 9)
+assert ui.slots[9].rom == ui.mem.state['tones'][0]['id'] and ui.slots[9].audio is None and 'USB' in ui.pads[9]['texts'][1]
+errors = []
+app.messagebox.showerror = lambda *a, **k: errors.append(a[1])
+assert ui.build() is None and 'Send to TR-8S (USB)' in errors[-1]  # a kit file cannot point at TR-8S samples
+app.messagebox.showerror = lambda *a, **k: None
+ui.slots[9].clear()
+# library: single files can be added (e.g. dropped), and are listed at the top level
+ui.browser.add_roots([k2])  # already in a pack: still listed once, in its pack
+assert len([it for it in ui.browser.items if it['path'] == k2]) == 1
+loose = os.path.join(tmp, 'loose.wav')
+app.sf.write(loose, np.full((441, 1), 0.1, 'float32'), 44100)
+ui.browser.add_roots([loose, loose])
+assert ui.browser.roots.count(loose) == 1 and loose in ui.browser.tree.get_children('')
+ui.browser.roots.remove(os.path.normpath(k2))
+ui.browser.roots.remove(loose)
+ui.browser.rescan()
 ui.mem.state = None
+
+# pads and toolbars are drawn on canvases: real clicks on their drawn buttons must reach the right action
+root.deiconify()  # drawn only once the window has a real size
+root.update()
+for p_ in ui.pads:
+    p_['drawn'] = None
+ui.refresh()
+root.update()
+
+
+def click(cv, tag):
+    x0, y0, x1, y1 = cv.bbox(cv.find_withtag(tag)[0])
+    cv.event_generate('<Motion>', x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+    cv.event_generate('<Button-1>', x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+    root.update()
+
+
+ui.slots[0].set('Click', np.full((441, 1), 0.1, 'float32'))
+ui.refresh()
+root.update()
+click(ui.pads[0]['cv'], 'b:fit')
+assert ui.slots[0].fit
+click(ui.pads[0]['cv'], 'b:clear')
+assert ui.slots[0].audio is None
+size = next(i for i, it in enumerate(ui.bar.items) if it['key'] == 1.2)
+click(ui.bar, f'b:{size}')
+assert ui.zoom == 1.2
+ui.set_zoom(1.0)
+root.withdraw()
 
 # keys 1..0, - play pads; typing in a text field does not
 played = []

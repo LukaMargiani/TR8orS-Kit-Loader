@@ -195,13 +195,25 @@ never changes.
 
 The panel on the left.
 
-- **+ Folder** adds a sample folder (it is scanned, including sub-folders). **− Remove** removes the selected folder from
-  the library; it never deletes files.
+- **+ Folder** adds a sample folder (it is scanned, including sub-folders). You can also **drag folders or single
+  files from Explorer** onto the library. **− Remove** removes the selected folder or file from the library; it never
+  deletes files.
+- **Samples of opened kits join the library.** When you open a `.t8k` kit (or a project whose samples are no longer on
+  your PC), its samples are saved as WAV files in `Documents\TR8orS-Kit-Loader\Kit samples\<kit name>` and that
+  folder is added to the library, so you can use them in other kits.
 - **Search** filters by name. The **type chips** (Kick, Snare, Closed hat…) filter by type and show how many samples of
   each type you have. Types come from file and folder names.
 - **Click** a sample to preview it. **Double-click** it, or press **Enter**, to load it into the selected pad. You can
   also drag it onto any pad.
-- The **TR-8S** column and the **ON TR-8S** chip mark samples that are already on your TR-8S, after a USB read.
+- **The TR-8S samples folder** (at the top of the list, after a USB read) lists every user sample on your TR-8S, also
+  ones that are not in your library. Load one into a pad like any other sample: the pad then plays that sample as it
+  is, using no new memory. Such pads can only be sent with **Send to TR-8S (USB)**, since a kit file cannot point at
+  samples already on the TR-8S. These samples cannot be previewed, because their audio is on the TR-8S, not on your PC.
+  The **On TR-8S** chip shows only what is on the TR-8S.
+- **The TR-8S column** tells you where a sample is used:
+  - <b>green</b>, for example `US 12 · 3 kits`: on the TR-8S and used by kits;
+  - <b>yellow</b>, `US 12 · no kit`: on the TR-8S, but no kit uses it (it still takes memory);
+  - empty: not on the TR-8S.
 - When you load a sample that is already on the TR-8S, the app uses the same settings automatically so the copy on the
   TR-8S can be re-used. If a *similar* sample is on it (the same file with other settings, for example), the app warns
   you.
@@ -269,6 +281,7 @@ during an upload, delete or optimize.
 | `*.t8k` | A TR-8S kit file, the same format the TR-8S exports. |
 | `%APPDATA%\TR8orS-Kit-Loader\` | The app's own data: settings (window size, zoom, SD folder, library folders), the last TR-8S read, which library files were uploaded, and the kit settings copied from your TR-8S. Delete this folder to reset the app. |
 | `Documents\TR8orS-Kit-Loader\` | Default folder for projects and kits. |
+| `Documents\TR8orS-Kit-Loader\Kit samples\` | The samples of kits you opened, as WAV files, so the library can use them. |
 
 Nothing is sent anywhere except to your TR-8S over USB. The app never connects to the internet.
 

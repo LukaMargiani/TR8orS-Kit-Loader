@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -43,6 +44,7 @@ PREVIEW = os.path.join(tempfile.gettempdir(), 'tr8ors_preview.wav')
 FIT_FADE_MS, DECLICK_MS = 30, 3  # fade where Fit shortens a sound; tiny fade on any edge cut into one
 HPF_OFF, LPF_OFF, FADE_MAX = 20.0, 20000.0, 10000.0
 PROJ_EXT = '.tr8proj'
+KIT_SAMPLES = os.path.join(KITS_DIR, 'Kit samples')  # samples of opened kits, as library files
 KEYS = '1234567890-'  # keyboard shortcuts that play pads BD..RC
 # pad settings that change the audio sent: any difference means the TR-8S stores another copy
 PARAM_KEYS = ('mono', 'lo', 'fit', 'start', 'end', 'fade_in', 'fade_out', 'hpf', 'lpf', 'gain', 'norm')
@@ -53,6 +55,7 @@ SLOT_KEYS = ('name', 'rom', 'src', 'type', 'mono', 'lo', 'fit', 'start', 'end', 
 BG, PANEL, RAISED, HOVER, FIELD, LINE = '#2b2b2b', '#363636', '#454545', '#525252', '#1e1e1e', '#1a1a1a'
 TEXT, DIM, ACCENT, WARN, WAVE_BG = '#d6d6d6', '#8f8f8f', '#ffab4a', '#ff5c5c', '#222222'
 TOOLBAR = '#1f1f1f'  # darker box for the main actions
+USED, UNUSED = '#3fd46b', '#ffe047'  # library: on the TR-8S and used by a kit / on it but in no kit
 GHOST = '#4a4a4a'  # the untouched waveform, drawn behind the processed one
 SS = 4  # supersampling for smooth (anti-aliased) knobs and graphs
 HEX = ['#ff4b4b', '#ff9b3d', '#ffe047', '#b5e34a', '#3fd46b', '#4fd2f5',
@@ -302,31 +305,136 @@ def button(parent, text, cmd, **kw):
                      activebackground=HOVER, activeforeground=TEXT, padx=7, pady=2, cursor='hand2'), **kw})
 
 
-def flow(frame, gap=4):
-    """Lay the frame's children out left to right, wrapping onto a new line when the window is too narrow."""
-    def lay(_=None):
-        width, x, y, row = frame.winfo_width(), 0, 0, 0
-        for c in frame.winfo_children():
-            cw, ch = c.winfo_reqwidth(), c.winfo_reqheight()
-            if x and x + cw > width:
-                x, y, row = 0, y + row + gap, 0
-            c.place(x=x, y=y)
-            x, row = x + cw + gap, max(row, ch)
-        if frame.winfo_reqheight() != y + row:
-            frame.config(height=y + row)
-    frame.bind('<Configure>', lay)
-    return lay
+class ButtonBar(tk.Canvas):
+    """Buttons, texts, images and widgets in a row that wraps when narrow, drawn on one canvas. Windows repaints
+    every real widget on each resize step (~1.5 ms each), so groups of buttons are drawn instead of being widgets."""
+
+    def __init__(self, parent, bg, gap=4, font='base'):
+        super().__init__(parent, bg=bg, highlightthickness=0, height=1)
+        self.bg, self.gap, self.font, self.items, self.lit, self.drawn = bg, gap, font, [], set(), None
+        self.bind('<Configure>', lambda e: self.lay())
+        self.bind('<Button-1>', self.click)
+        self.tag_bind('btn', '<Enter>', lambda e: self.hover(True))
+        self.tag_bind('btn', '<Leave>', lambda e: self.hover(False))
+
+    def add(self, text='', cmd=None, key=None, image=None, widget=None, fg=TEXT, font=None, gap=None):
+        """A button when cmd is given, else a text (or image / embedded widget). gap: space before it."""
+        self.items.append(dict(text=text, cmd=cmd, key=key or text, image=image, widget=widget, fg=fg,
+                               font=font, gap=self.gap if gap is None else gap))
+        self.drawn = None
+
+    def clear(self):
+        self.items, self.drawn = [], None
+
+    def light(self, key, on):
+        (self.lit.add if on else self.lit.discard)(key)
+        self.drawn = None
+        self.lay()
+
+    def lay(self):
+        w = self.winfo_width()
+        state = (w, tuple(sorted(map(str, self.lit))), F['base'].actual('size'), len(self.items))
+        if w < 2 or state == self.drawn:
+            return
+        self.drawn = state
+        self.delete('all')
+        bh = F['base'].metrics('linespace') + px(6)
+        pos, x, y, row = [], 0, 0, 0
+        for it in self.items:
+            font = F[it['font'] or self.font]
+            iw, ih = ((it['image'].width(), it['image'].height()) if it['image'] else
+                      (it['widget'].winfo_reqwidth(), it['widget'].winfo_reqheight()) if it['widget'] else
+                      (font.measure(it['text']) + (px(14) if it['cmd'] else 0), bh if it['cmd'] else font.metrics('linespace')))
+            if x and x + it['gap'] + iw > w:
+                x, y, row = 0, y + row + self.gap, 0
+            x += it['gap'] if x else 0
+            pos.append((it, x, y, iw, ih, font))
+            x, row = x + iw, max(row, ih)
+        rows = {}
+        for it, x, y, iw, ih, font in pos:  # vertical centre of each wrapped line
+            rows[y] = max(rows.get(y, 0), ih)
+        for it, x, y, iw, ih, font in pos:
+            cy = y + rows[y] / 2
+            if it['image']:
+                self.create_image(x, cy, image=it['image'], anchor='w')
+            elif it['widget']:
+                self.create_window(x, cy, window=it['widget'], anchor='w')
+            elif it['cmd']:
+                on = it['key'] in self.lit
+                tag = f'b:{self.items.index(it)}'
+                self.create_rectangle(x, cy - ih / 2, x + iw, cy + ih / 2, width=0, fill=ACCENT if on else RAISED,
+                                      tags=(tag, 'btn', 'face', 'lit' if on else 'off'))
+                self.create_text(x + iw / 2, cy, text=it['text'], fill='#111' if on else TEXT, font=font,
+                                 tags=(tag, 'btn'))
+            else:
+                self.create_text(x, cy, text=it['text'], fill=it['fg'], font=font, anchor='w')
+        h = max(rows.values(), default=0) + max(rows, default=0)
+        if int(self.cget('height')) != h:
+            self.config(height=h)
+
+    def tag(self):
+        return next((t for t in self.gettags('current') if t.startswith('b:')), None)
+
+    def click(self, e):
+        t = self.tag()
+        if t:
+            self.items[int(t[2:])]['cmd']()
+
+    def hover(self, on):
+        t = self.tag()
+        self.config(cursor='hand2' if on else '')
+        for item in self.find_withtag(t) if t else ():
+            if 'off' in self.gettags(item):
+                self.itemconfig(item, fill=HOVER if on else RAISED)
 
 
 def wrap(label):
     """Let a label's text wrap to its current width instead of being cut off."""
-    label.bind('<Configure>', lambda e: label.config(wraplength=max(100, e.width - 20)))
+    def fit(e):
+        w = max(100, e.width - 20)
+        if int(label.cget('wraplength')) != w:
+            label.config(wraplength=w)
+    label.bind('<Configure>', fit)
     return label
+
+
+def put(w, **kw):
+    """configure() only what changed: Tk redraws a widget on every configure, even to the same value."""
+    kw = {k: v for k, v in kw.items() if str(w.cget(k)) != str(v)}
+    if kw:
+        w.config(**kw)
+
+
+class Legend(tk.Text):
+    """Wrapping text whose color words show their color: {green} and {yellow} as text in that color, {orange} like a
+    lit (orange) button. Read-only; as many lines tall as the text needs at the current width."""
+
+    def __init__(self, parent, bg, fg=DIM, font='base', text=''):
+        super().__init__(parent, bg=bg, fg=fg, font=F[font], wrap='word', relief='flat', bd=0, highlightthickness=0,
+                         height=1, cursor='arrow', takefocus=0, padx=0, pady=0)
+        self.tag_configure('green', foreground=USED)
+        self.tag_configure('yellow', foreground=UNUSED)
+        self.tag_configure('orange', background=ACCENT, foreground='#111')
+        self.bind('<Configure>', lambda e: self.fit())
+        self.show(text)
+
+    def show(self, text, fg=None):
+        self.config(state='normal', **({'fg': fg} if fg else {}))
+        self.delete('1.0', 'end')
+        for k, part in enumerate(re.split(r'\{(green|yellow|orange)\}', text)):
+            self.insert('end', part if k % 2 == 0 else f'\u2009{part}\u2009', () if k % 2 == 0 else (part,))
+        self.config(state='disabled')
+        self.fit()
+
+    def fit(self):
+        lines = self.count('1.0', 'end', 'displaylines') or (1,)
+        if int(self.cget('height')) != max(1, lines[0]):
+            self.config(height=max(1, lines[0]))
 
 
 def light(b, on):
     """Orange box while a feature is on."""
-    b.config(bg=ACCENT if on else RAISED, fg='#111' if on else TEXT, activebackground=ACCENT if on else HOVER)
+    put(b, bg=ACCENT if on else RAISED, fg='#111' if on else TEXT, activebackground=ACCENT if on else HOVER)
 
 
 def wave_points(a, x0, x1, h):
@@ -479,28 +587,21 @@ class App:
         # main actions in their own darker box, apart from the library's buttons; wraps when narrow
         box = tk.Frame(root, bg=TOOLBAR, highlightthickness=1, highlightbackground=LINE)
         box.pack(fill='x', padx=10, pady=(10, 6))
-        bar = tk.Frame(box, bg=TOOLBAR, height=40)
+        bar = self.bar = ButtonBar(box, TOOLBAR)
         bar.pack(fill='x', padx=8, pady=8)
-        logo = tk.Frame(bar, bg=TOOLBAR)
-        self.logo = tk.Label(logo, bg=TOOLBAR)
-        self.logo.pack(side='left', padx=(0, 8))
-        tk.Label(logo, text='TR8orS', bg=TOOLBAR, fg=ACCENT, font=F['title_bold']).pack(side='left')
-        tk.Label(logo, text='KIT LOADER', bg=TOOLBAR, fg=DIM, font=F['title']).pack(side='left', padx=(4, 12))
-        for text, cmd in [('New kit', self.new), ('Open…', self.open), ('Load folder…', self.load_folder),
+        bar.add(image=self.logo_image())
+        bar.add('TR8orS', fg=ACCENT, font='title_bold', gap=px(8))
+        bar.add('KIT LOADER', fg=DIM, font='title', gap=px(4))
+        for k, (text, cmd) in enumerate([('New kit', self.new), ('Open…', self.open), ('Load folder…', self.load_folder),
                           ('Save project…', self.save_project), ('Save .t8k…', self.save),
                           ('Send to TR-8S (USB)…', self.send_usb), ('Export to SD card', self.export_sd),
-                          ('TR-8S rules', lambda: rules(self.root))]:
-            button(bar, text, cmd)
-        name = tk.Frame(bar, bg=TOOLBAR)
-        tk.Label(name, text='Kit name', bg=TOOLBAR, fg=TEXT, font=F['base']).pack(side='left', padx=(10, 4))
-        ttk.Entry(name, font=F['base'], textvariable=self.name, width=18).pack(side='left')
-        size = tk.Frame(bar, bg=TOOLBAR)
-        tk.Label(size, text='Size', bg=TOOLBAR, fg=TEXT, font=F['base']).pack(side='left', padx=(10, 4))
-        self.size_btns = {}
+                          ('TR-8S rules', lambda: rules(self.root))]):
+            bar.add(text, cmd, gap=px(12) if k == 0 else None)
+        bar.add('Kit name', gap=px(14))
+        bar.add(widget=ttk.Entry(bar, font=F['base'], textvariable=self.name, width=18))
+        bar.add('Size', gap=px(14))
         for z in ZOOMS:
-            self.size_btns[z] = button(size, f'{round(z * 100)}%', lambda z=z: self.set_zoom(z), padx=4)
-            self.size_btns[z].pack(side='left', padx=1)
-        self.relayout_bar = flow(bar)
+            bar.add(f'{round(z * 100)}%', lambda z=z: self.set_zoom(z), key=z, gap=px(2))
 
         wrap(tk.Label(root, bg=BG, fg=DIM, font=F['base'], anchor='w', justify='left', text=RULE_OF_THUMB)).pack(
             side='bottom', fill='x', padx=12, pady=(0, 8))
@@ -509,7 +610,7 @@ class App:
         tk.Label(mem, text='TR-8S MEMORY', bg=PANEL, fg=DIM, font=F['small_bold']).pack(side='left', padx=(8, 6))
         self.mem_bar = tk.Canvas(mem, width=180, height=12, bg=FIELD, highlightthickness=0)
         self.mem_bar.pack(side='left', pady=8)
-        self.mem_text = wrap(tk.Label(mem, bg=PANEL, fg=TEXT, font=F['base'], anchor='w', justify='left'))
+        self.mem_text = Legend(mem, PANEL, TEXT)
         self.mem_text.pack(side='left', padx=8, fill='x', expand=True)
         button(mem, 'Details…', lambda: details(self)).pack(side='right', padx=6, pady=4)
         button(mem, '?', lambda: rules(self.root), padx=8).pack(side='right', padx=(0, 6), pady=4)
@@ -527,14 +628,13 @@ class App:
         self.total = ttk.Label(ram)
         self.total.pack(side='right')
 
-        sd = ttk.Frame(kit, padding=(8, 4, 10, 0))
-        sd.pack(fill='x')
-        ttk.Label(sd, text='TR-8S SD card').pack(side='left', padx=(0, 4))
-        ttk.Entry(sd, font=F['base'], textvariable=self.sd_dir).pack(side='left', fill='x', expand=True)
-        button(sd, '…', self.browse).pack(side='left', padx=(2, 12))
-        self.wav_btn = button(sd, 'Also save WAVs to SAMPLE', self.toggle_wavs)
-        self.wav_btn.pack(side='left')
-        light(self.wav_btn, self.save_wavs)
+        sd = self.sd_bar = ButtonBar(kit, BG)
+        sd.pack(fill='x', padx=(8, 10), pady=(4, 0))
+        sd.add('TR-8S SD card')
+        sd.add(widget=ttk.Entry(sd, font=F['base'], textvariable=self.sd_dir, width=36))
+        sd.add('…', self.browse, gap=px(2))
+        sd.add('Also save WAVs to SAMPLE', self.toggle_wavs, key='wavs', gap=px(12))
+        sd.light('wavs', self.save_wavs)
 
         # pads live in a scrolling area: as many columns as fit, more rows when narrow, never squeezed
         scroller = tk.Frame(kit, bg=BG)
@@ -551,53 +651,27 @@ class App:
         root.bind_all('<MouseWheel>', self.wheel, add='+')
         self.cols = 0
         self.pads = []
-        for i, s in enumerate(t8k.SLOTS):
-            f = tk.Frame(grid, bg=PANEL, highlightthickness=1, highlightbackground=LINE)
-            bar = tk.Frame(f)  # colored with the pad in refresh(), so no light strip shows around the label
-            bar.pack(fill='x')
-            head = tk.Label(bar, anchor='w', padx=6, fg='#111', font=F['bold'], cursor='hand2')
-            head.pack(side='left', fill='x', expand=True)
-            head.bind('<Button-1>', lambda e, i=i: self.pick_color(i, e))
-            x = tk.Button(bar, text='✕', command=lambda i=i: self.clear(i), relief='flat', bd=0, fg='#111',
-                          font=F['bold'], padx=6, cursor='hand2', highlightthickness=0)
-            x.pack(side='right')
-            cv = tk.Canvas(f, height=round(PAD_WAVE_H * self.zoom), bg=WAVE_BG, highlightthickness=0, cursor='hand2')
-            cv.pack(fill='x', padx=6, pady=(6, 4))
+        # each pad is drawn on one canvas: Windows moves and repaints every widget on each resize step, and ten
+        # widgets per pad made resizing take ~0.4 s per step (one canvas: ~0.05 s)
+        for i in range(len(t8k.SLOTS)):
+            cv = tk.Canvas(grid, bg=PANEL, highlightthickness=0, cursor='hand2', height=px(250))
             cv.bind('<Configure>', lambda e, i=i: self.draw_pad(i))
-            name = tk.Label(f, anchor='w', bg=PANEL, fg=TEXT, font=F['bold'])
-            info = wrap(tk.Label(f, anchor='w', justify='left', bg=PANEL, fg=DIM, font=F['base']))
-            dev = wrap(tk.Label(f, anchor='w', justify='left', bg=PANEL, fg=DIM, font=F['base']))  # never cut off
-            name.pack(fill='x', padx=6)
-            info.pack(fill='x', padx=6)
-            dev.pack(fill='x', padx=6)
-            rows = tk.Frame(f, bg=PANEL)
-            rows.pack(fill='x', padx=6, pady=6)
-            btns = {}
-            for r, keys in enumerate([[('play', '▶', lambda i=i: self.play(i)), ('edit', 'Edit', lambda i=i: self.edit(i))],
-                                      [('mono', 'Mono', lambda i=i: self.toggle(i, 'mono')),  # toggles: own row
-                                       ('lo', '22.05 kHz', lambda i=i: self.toggle(i, 'lo')),
-                                       ('fit', 'Fit', lambda i=i: self.toggle(i, 'fit'))]]):
-                row = tk.Frame(rows, bg=PANEL)
-                row.pack(fill='x', pady=(2 * r, 0))
-                for key, text, cmd in keys:
-                    btns[key] = button(row, text, cmd, padx=2)
-                    btns[key].pack(side='left', padx=(0, 2), fill='x', expand=True)
-            for w in (f, cv, name, info):
-                w.drop_target_register(DND_FILES)
-                w.dnd_bind('<<Drop>>', lambda e, i=i: self.drop(e, i))
-                w.bind('<Button-1>', lambda e, i=i: (self.select(i), self.play(i)))
-            self.pads.append(dict(frame=f, bar=bar, head=head, x=x, cv=cv, name=name, info=info, dev=dev, **btns))
+            cv.bind('<Button-1>', lambda e, i=i: self.pad_click(i, e))
+            cv.tag_bind('btn', '<Enter>', lambda e, cv=cv: self.pad_hover(cv, True))
+            cv.tag_bind('btn', '<Leave>', lambda e, cv=cv: self.pad_hover(cv, False))
+            cv.drop_target_register(DND_FILES)
+            cv.dnd_bind('<<Drop>>', lambda e, i=i: self.drop(e, i))
+            self.pads.append(dict(frame=cv, cv=cv, texts=None, drawn=None))
         root.drop_target_register(DND_FILES)
         root.dnd_bind('<<Drop>>', lambda e: self.drop(e, None))
         root.bind_all('<Key>', self.key)
-        wrap(tk.Label(kit, bg=BG, fg=DIM, font=F['base'], anchor='w', justify='left', padx=8,
-                      text='Click a pad to select + preview (keys 1–0, -) · double-click / drag a library sample to load '
-                           'it into the selected pad · click the colored header for the TR-8S color · orange = on: '
-                           'Mono, 22.05 kHz (half the memory), Fit (shorten to fit 1 memory block, with a smooth fade)')
-             ).pack(side='bottom', fill='x', pady=(0, 6), before=scroller)  # packed first: never squeezed out
+        Legend(kit, BG, text='Click a pad to select + preview (keys 1–0, -) · double-click / drag a library sample '
+                             'to load it into the selected pad · click the colored header for the TR-8S color · '
+                             '{orange} = on: Mono, 22.05 kHz (half the memory), Fit (shorten to fit 1 memory block, '
+                             'with a smooth fade)'
+               ).pack(side='bottom', fill='x', padx=8, pady=(0, 6), before=scroller)  # packed first: never squeezed out
         self.sel = 0
         self.light_size()
-        self.size_logo()
         self.refresh()
         self.dirty = False
 
@@ -629,28 +703,30 @@ class App:
         self.zoom = z
         theme(self.root, z)
         for p in self.pads:
-            p['cv'].config(height=round(PAD_WAVE_H * z))
+            p['drawn'] = None  # sizes follow the fonts
         self.cols = 0
         self.reflow()
+        self.logo_image()
         self.light_size()
-        self.size_logo()
-        self.root.after(50, self.relayout_bar)
         self.refresh()
 
-    def size_logo(self):
-        """The record logo in the toolbar, a little taller than the title row at this view size, so its colors read on the dark toolbar."""
+    def logo_image(self):
+        """The record logo for the toolbar, a little taller than the title at this view size, so its colors read on
+        the dark toolbar."""
         size = px(46 * self.zoom)
         self.logo_img = ImageTk.PhotoImage(self.logo_src.resize((size, size), Image.LANCZOS), master=self.root)
-        self.logo.config(image=self.logo_img)
+        if self.bar.items:
+            self.bar.items[0]['image'], self.bar.drawn = self.logo_img, None
+        return self.logo_img
 
     def light_size(self):
-        for z, b in self.size_btns.items():
-            light(b, z == self.zoom)
+        for z in ZOOMS:
+            self.bar.light(z, z == self.zoom)
 
     def select(self, i):
         self.sel = i
         for k, p in enumerate(self.pads):
-            p['frame'].config(highlightbackground=ACCENT if k == i else LINE, highlightthickness=2 if k == i else 1)
+            p['cv'].itemconfig('sel', outline=ACCENT if k == i else LINE, width=px(2) if k == i else 1)
 
     def key(self, e):
         i = KEYS.find(e.char) if e.char else -1
@@ -694,43 +770,109 @@ class App:
 
     def toggle_wavs(self):
         self.save_wavs = not self.save_wavs
-        light(self.wav_btn, self.save_wavs)
+        self.sd_bar.light('wavs', self.save_wavs)
 
     # ---- pads ----
 
+    PAD_BUTTONS = [[('play', '▶'), ('edit', 'Edit')], [('mono', 'Mono'), ('lo', '22.05 kHz'), ('fit', 'Fit')]]
+
     def draw_pad(self, i):
-        s, cv = self.slots[i], self.pads[i]['cv']
-        draw_wave(cv, None if s.audio is None else s.audio[s.start:s.end], HEX[self.meta['colors'][i]])
+        """Draw pad i on its canvas: header, waveform, texts, buttons. Only when something it shows changed."""
+        s, p = self.slots[i], self.pads[i]
+        cv, w = p['cv'], p['cv'].winfo_width()
+        if w < 20 or p['texts'] is None:
+            return
+        color = HEX[self.meta['colors'][i]]
+        key = (w, self.zoom, color, id(s.audio), s.start, s.end, s.mono, s.lo, s.fit, p['texts'])
+        if p['drawn'] == key:
+            return
+        p['drawn'] = key
+        name, info, info_fg, dev, dev_fg = p['texts']
+        g, line, bold = px(6), F['base'].metrics('linespace'), F['bold'].metrics('linespace')
+        cv.delete('all')
+        hh = bold + px(6)
+        cv.create_rectangle(0, 0, w, hh, fill=color, width=0, tags='head')
+        cv.create_text(g, hh / 2, anchor='w', text=f'{KEYS[i]}   {t8k.SLOTS[i]}   ·   {t8k.COLORS[self.meta["colors"][i]]}',
+                       fill='#111', font=F['bold'], tags='head')
+        cv.create_text(w - g, hh / 2, anchor='e', text='✕', fill='#111', font=F['bold'], tags='b:clear')
+        y, wh = hh + g, round(PAD_WAVE_H * self.zoom)
+        cv.create_rectangle(g, y, w - g, y + wh, fill=WAVE_BG, width=0)
+        cv.create_line(g, y + wh / 2, w - g, y + wh / 2, fill=LINE)
+        a = None if s.audio is None else s.audio[s.start:s.end]
+        if a is not None and len(a) > 1:
+            pts = wave_points(a, g, w - g, wh)
+            pts[1::2] = [v + y for v in pts[1::2]]
+            cv.create_polygon(pts, fill=color, outline=color)
+        y += wh + px(4)
+        cv.create_text(g, y, anchor='nw', text=name, fill=TEXT, font=F['bold'])
+        y += bold
+        t = cv.create_text(g, y, anchor='nw', text=info, fill=info_fg, font=F['base'], width=w - 2 * g)
+        y = max(y + 2 * line, cv.bbox(t)[3])  # wrapped text pushes the buttons down instead of running under them
+        if dev:
+            t = cv.create_text(g, y, anchor='nw', text=dev, fill=dev_fg, font=F['base'], width=w - 2 * g)
+            y = cv.bbox(t)[3]
+        y += g
+        bh = line + px(6)
+        for row in self.PAD_BUTTONS:
+            bw = (w - 2 * g - px(2) * (len(row) - 1)) / len(row)
+            for k, (b, text) in enumerate(row):
+                x0 = g + k * (bw + px(2))
+                lit = b in ('mono', 'lo', 'fit') and getattr(s, b)
+                cv.create_rectangle(x0, y, x0 + bw, y + bh, width=0, fill=ACCENT if lit else RAISED,
+                                    tags=(f'b:{b}', 'btn', 'face', 'lit' if lit else 'off'))
+                cv.create_text(x0 + bw / 2, y + bh / 2, text=text, fill='#111' if lit else TEXT, font=F['base'],
+                               tags=(f'b:{b}', 'btn'))
+            y += bh + px(2)
+        h = round(y + g)
+        sel = i == self.sel
+        cv.create_rectangle(0, 0, w - 1, h - 1, outline=ACCENT if sel else LINE, width=px(2) if sel else 1, tags='sel')
+        if int(cv.cget('height')) != h:
+            cv.config(height=h)
+
+    def pad_click(self, i, e):
+        """A click on pad i: its buttons, the header (TR-8S color), the ✕, or anywhere else = select and play."""
+        tags = e.widget.gettags('current')
+        act = next((t[2:] for t in tags if t.startswith('b:')), None)
+        if act == 'clear':
+            self.clear(i)
+        elif act == 'play':
+            self.play(i)
+        elif act == 'edit':
+            self.edit(i)
+        elif act:
+            self.toggle(i, act)
+        elif 'head' in tags:
+            self.pick_color(i, e)
+        else:
+            self.select(i)
+            self.play(i)
+
+    @staticmethod
+    def pad_hover(cv, on):
+        b = next((t for t in cv.gettags('current') if t.startswith('b:')), None)
+        for item in cv.find_withtag(b) if b else ():
+            if 'face' in cv.gettags(item) and 'off' in cv.gettags(item):
+                cv.itemconfig(item, fill=HOVER if on else RAISED)
 
     def refresh(self):
         total = ram = 0
         for i, (s, p) in enumerate(zip(self.slots, self.pads)):
-            color = self.meta['colors'][i]
-            p['head'].config(text=f'{KEYS[i]}   {t8k.SLOTS[i]}   ·   {t8k.COLORS[color]}', bg=HEX[color])
-            p['x'].config(bg=HEX[color], activebackground=HEX[color])
-            p['bar'].config(bg=HEX[color])
-            self.draw_pad(i)
-            for k in ('mono', 'lo', 'fit'):
-                light(p[k], getattr(s, k))
             if s.audio is not None:
                 b = s.nbytes()
                 total += b
                 ram += lib.cost(b)
                 ch = 'M' if s.mono or s.audio.shape[1] == 1 else 'ST'
-                p['name']['text'] = s.name.upper()
                 blocks = lib.cost(b) // lib.BLOCK_BYTES
-                p['info']['text'] = (f'{s.type} · {s.length() / RATE:.2f}s · {ch}\n'
-                                     f'{b // 1024} KB · {blocks} block{"s" if blocks > 1 else ""} '
-                                     f'({lib.cost(b) / lib.BYTES_PER_SECOND:.1f} s)')
-                p['info']['fg'] = WARN if b > SLOT_MAX else DIM
-                text, fg = self.device_text(s, short=True)
-                p['dev'].config(text=text, fg=fg)
+                p['texts'] = (s.name.upper(), f'{s.type} · {s.length() / RATE:.2f}s · {ch}\n{b // 1024} KB · {blocks} '
+                              f'block{"s" if blocks > 1 else ""} ({lib.cost(b) / lib.BYTES_PER_SECOND:.1f} s)',
+                              WARN if b > SLOT_MAX else DIM, *self.device_text(s, short=True))
             else:
-                p['dev'].config(text='')
-                p['name']['text'] = s.name or '— empty —'
-                p['info']['text'] = ('Built-in sound · no memory\n' if s.rom is not None else
-                                     f'Plays built-in {t8k.DEFAULT_ROM[i][1]}\nDrop a sample to replace')
-                p['info']['fg'] = DIM
+                p['texts'] = (s.name or '— empty —',
+                              f'On the TR-8S (US {s.rom - t8k.USER_TONE + 1}): no new memory\nNo preview · send by USB'
+                              if s.rom is not None and s.rom >= t8k.USER_TONE else
+                              'Built-in sound · no memory\n' if s.rom is not None else
+                              f'Plays built-in {t8k.DEFAULT_ROM[i][1]}\nDrop a sample to replace', DIM, '', DIM)
+            self.draw_pad(i)
         self.total['text'] = (f'This kit {total / 2 ** 20:.2f} / 12 MB   ·   '
                               f'RAM {ram / lib.BYTES_PER_SECOND:.1f} s (whole 1.49 s blocks)')
         self.total['foreground'] = WARN if total > KIT_MAX else TEXT
@@ -746,10 +888,10 @@ class App:
                                       fill=WARN if over else ACCENT, width=0)
         read = (time.strftime('read %d %b %H:%M', time.localtime(self.mem.read_at)) if self.mem.state else
                 'not read yet: connect it by USB and press Read TR-8S')
-        self.mem_text.config(fg=WARN if over else TEXT,
-                             text=f'{used / lib.BYTES_PER_SECOND:.1f} / {lib.DEVICE_SECONDS:.0f} s   ·   {count} / '
+        self.mem_text.show(fg=WARN if over else TEXT,
+                           text=f'{used / lib.BYTES_PER_SECOND:.1f} / {lib.DEVICE_SECONDS:.0f} s   ·   {count} / '
                                   f'{lib.DEVICE_SAMPLES} samples   ·   {kits} / {lib.DEVICE_KITS} kits   ·   '
-                                  f'this kit adds {add / lib.BYTES_PER_SECOND:.1f} s (orange)   ·   {read}')
+                                  f'this kit adds {add / lib.BYTES_PER_SECOND:.1f} s ({{orange}})   ·   {read}')
         self.dirty = True
 
     def device_status(self, s):
@@ -823,6 +965,11 @@ class App:
         errors = [f'{len(paths) - len(free)} file(s) skipped: no free pads'] if len(paths) > len(free) else []
         known = []
         for i, p in zip(free, paths):
+            if p.startswith(Browser.TR8S):  # a sample on the TR-8S: the pad plays it as it is (USB only)
+                t = next(t for t in self.mem.state['tones'] if t['id'] == int(p[len(Browser.TR8S):]))
+                self.slots[i].clear()
+                self.slots[i].name, self.slots[i].rom = t['name'], t['id']
+                continue
             try:
                 self.slots[i].set(os.path.splitext(os.path.basename(p))[0], load_audio(p), src=os.path.abspath(p))
                 self.use_device_settings(self.slots[i])  # already on the TR-8S: same settings, so it is re-used
@@ -899,6 +1046,7 @@ class App:
             return
         try:
             self.open_project(p) if p.lower().endswith(PROJ_EXT) else self.open_kit(p)
+            self.to_library(os.path.splitext(os.path.basename(p))[0])
         except Exception as ex:
             messagebox.showerror(APP, f'Could not open {os.path.basename(p)}:\n{ex}')
         self.refresh()
@@ -914,6 +1062,22 @@ class App:
                 s.name, s.rom = sname, x
             else:
                 s.set(sname, resample(x.astype('float32') / 32768, rate), lo=rate < RATE)
+
+    def to_library(self, kit):
+        """Save the opened kit's samples that have no file of their own as WAVs in Kit samples\\<kit>, and add that
+        folder to the library, so they can be used in other kits. Pads then point at those files."""
+        pads = [(i, s) for i, s in enumerate(self.slots) if s.audio is not None and not (s.src and os.path.exists(s.src))]
+        if not pads:
+            return
+        d = os.path.join(KIT_SAMPLES, safe(kit))
+        os.makedirs(d, exist_ok=True)
+        for i, s in pads:
+            s.src = os.path.join(d, f'{i + 1:02d} {t8k.SLOTS[i]} {safe(s.name)}.wav')
+            sf.write(s.src, s.audio, RATE, subtype='FLOAT')  # float: exactly the pad's audio, nothing lost
+        if os.path.normpath(d) in self.browser.roots:
+            self.browser.rescan()
+        else:
+            self.browser.add_roots([d])
 
     # A project is a zip: project.json (settings, every pad parameter) + the untouched source audio as .npy,
     # so it reopens exactly as left even if the original sample files move or were never files (opened kits).
@@ -965,6 +1129,10 @@ class App:
     def build(self, usb=False):
         """Checks TR-8S limits, offers 22.05 kHz only for pads that must shrink. Returns (kit name, t8k slots) or None.
         usb: the kit goes over USB, not as a file, so it may consist of built-in sounds only."""
+        if not usb and any(s.audio is None and s.rom is not None and s.rom >= t8k.USER_TONE for s in self.slots):
+            return messagebox.showerror(APP, 'Pads that use a sample from the TR-8S folder of the library can only '
+                                             'be sent with Send to TR-8S (USB): a kit file cannot point at samples '
+                                             'already on the TR-8S.')
         if not usb and not any(s.audio is not None for s in self.slots):
             # hardware test: a .t8k without audio gives "Read Error!" and leaves the TR-8S unable to write the card
             return messagebox.showerror(APP, 'Add at least one sample: the TR-8S cannot read a kit file that has '
@@ -1036,6 +1204,12 @@ class App:
         state = read_device(self, self.root)
         if not state:
             return
+        have = {t['id'] for t in state['tones']}
+        gone = [t8k.SLOTS[i] for i, s in enumerate(self.slots) if s.audio is None and s.rom is not None
+                and s.rom >= t8k.USER_TONE and s.rom not in have]
+        if gone:
+            return messagebox.showerror(APP, f'These pads use a sample that is no longer on the TR-8S: '
+                                             f'{", ".join(gone)}. Load another sample into them.')
         name = (self.name.get().strip() or 'NEW KIT')[:16]
         slot = pick_slot(self.root, state, name)
         if slot is None:
@@ -1047,7 +1221,7 @@ class App:
         done = dict(new=0, reused=0)
 
         def status(text):
-            self.mem_text.config(text=text, fg=ACCENT)
+            self.mem_text.show(text, fg=ACCENT)
             self.root.update()
 
         def work(dev):
@@ -1404,11 +1578,14 @@ ON_TR8S = 'On TR-8S'  # library filter: files already on the TR-8S
 
 class Browser(tk.Frame):
     """Sample packs: folder tree, type chips with counts, search. Click previews; double-click / Enter loads into
-    the selected pad (several selected samples fill the following pads); or drag samples onto any pad."""
+    the selected pad (several selected samples fill the following pads); or drag samples onto any pad.
+    Drop folders or files here to add them. The TR-8S folder lists the samples on the TR-8S (from the last read);
+    loading one makes the pad use it as it is, with no new memory (USB only)."""
+    TR8S = 'tr8s:'  # tree id prefix of a sample on the TR-8S, e.g. 'tr8s:640'
 
     def __init__(self, parent, app, roots):
         super().__init__(parent, bg=BG)
-        self.app, self.roots, self.items, self.type, self.press_at = app, [r for r in roots if os.path.isdir(r)], [], None, None
+        self.app, self.roots, self.items, self.type, self.press_at = app, [r for r in roots if os.path.exists(r)], [], None, None
         head = tk.Frame(self, bg=BG)
         head.pack(fill='x', pady=(0, 6))
         tk.Label(head, text='LIBRARY', bg=BG, fg=DIM, font=F['small_bold']).pack(side='left')
@@ -1420,14 +1597,21 @@ class Browser(tk.Frame):
         search.pack(fill='x')
         ttk.Label(search, text='Search').pack(side='left', padx=(0, 6))
         ttk.Entry(search, font=F['base'], textvariable=self.q).pack(side='left', fill='x', expand=True)
-        self.chips = tk.Frame(self, bg=BG)
+        self.chips = ButtonBar(self, BG, gap=px(2), font='small')
         self.chips.pack(fill='x', pady=6)
+        Legend(self, BG, font='small',
+               text='Click = preview · double-click / Enter = load into the selected pad · drag onto a pad · drop '
+                    'folders or files here to add them. TR-8S column: {green} = used by a kit, {yellow} = on the '
+                    'TR-8S but in no kit.').pack(side='bottom', fill='x', pady=(4, 8))
         box = tk.Frame(self, bg=BG)
         box.pack(fill='both', expand=True)
         self.tree = ttk.Treeview(box, columns=('type', 'len', 'dev'), selectmode='extended')
-        for col, text, w in (('#0', 'Sample', 130), ('type', 'Type', 62), ('len', 'Length', 56), ('dev', 'TR-8S', 58)):
+        for col, text in (('#0', 'Sample'), ('type', 'Type'), ('len', 'Length'), ('dev', 'TR-8S')):
             self.tree.heading(col, text=text, anchor='w')
-            self.tree.column(col, width=w, minwidth=40, stretch=col == '#0', anchor='w')
+            self.tree.column(col, minwidth=10, stretch=False, anchor='w')
+        self.tree.bind('<Configure>', self.fit_columns)
+        self.tree.tag_configure('used', foreground=USED)
+        self.tree.tag_configure('unused', foreground=UNUSED)
         bar = ttk.Scrollbar(box, command=self.tree.yview)
         self.tree.config(yscrollcommand=bar.set)
         bar.pack(side='right', fill='y')
@@ -1437,54 +1621,90 @@ class Browser(tk.Frame):
         self.tree.bind('<Return>', lambda e: self.load(self.app.sel))
         self.tree.bind('<ButtonPress-1>', lambda e: setattr(self, 'press_at', (e.x_root, e.y_root)))
         self.tree.bind('<ButtonRelease-1>', self.release)
-        tk.Label(self, text='Click = preview · double-click / Enter = load into selected pad · drag onto a pad',
-                 bg=BG, fg=DIM, font=F['small'], wraplength=300, justify='left').pack(fill='x', pady=(4, 8))
+        self.tree.drop_target_register(DND_FILES)
+        self.tree.dnd_bind('<<Drop>>', self.drop)
         self.rescan()
+
+    def fit_columns(self, e):
+        """Columns never show cut-off text: when the list is narrow, whole columns are hidden (Type first, then
+        TR-8S, then Length) and the names get the rest of the width."""
+        rest, shown = e.width - px(110), []
+        for col, w in (('len', px(56)), ('dev', px(100)), ('type', px(70))):
+            if w <= rest:
+                shown.append(col)
+                rest -= w
+                self.tree.column(col, width=w)
+        cols = tuple(c for c in ('type', 'len', 'dev') if c in shown)
+        if tuple(self.tree['displaycolumns']) != cols:
+            self.tree['displaycolumns'] = cols or ('',)
+        self.tree.column('#0', width=px(110) + rest)
 
     def rescan(self):
         self.app.root.config(cursor='watch')
         self.app.root.update_idletasks()
-        self.items = [dict(it, root=r) for r in self.roots for it in lib.scan(r)]
+        items = {}  # a file in two roots (a dropped file inside an added folder) is listed once
+        for r in self.roots:
+            for it in lib.scan(r):
+                items.setdefault(it['path'], dict(it, root=r))
+        self.items = list(items.values())
         self.app.root.config(cursor='')
         self.chips_fill()
         self.fill()
 
+    def device(self):
+        """(TR-8S samples by tone id, Counter of how many kits use each) from the last read; empty if never read."""
+        st = self.app.mem.state
+        if not st:
+            return {}, Counter()
+        return {t['id']: t for t in st['tones']}, Counter(t for k in st['kits'] for t in set(k['tones']))
+
     def chips_fill(self):
-        for w in self.chips.winfo_children():
-            w.destroy()
+        self.chips.clear()
         counts = Counter(it['type'] for it in self.items)
         chips = [(None, f'All {len(self.items)}')] + [(t, f'{t} {counts[t]}') for t in lib.TYPE_NAMES if counts[t]]
-        on = sum(1 for it in self.items if self.on_device(it['path']))
-        if on:
-            chips.append((ON_TR8S, f'On TR-8S {on}'))
-        for k, (t, text) in enumerate(chips):
-            b = button(self.chips, text, lambda t=t: self.pick(t), padx=4, font=F['small'])
-            b.grid(row=k // 3, column=k % 3, sticky='ew', padx=1, pady=1)
-            self.chips.columnconfigure(k % 3, weight=1)
-            light(b, t == self.type)
+        if self.app.mem.state:
+            chips.append((ON_TR8S, f'On TR-8S {len(self.app.mem.state["tones"])}'))
+        self.chips.lit = {str(self.type)}
+        for t, text in chips:
+            self.chips.add(text, lambda t=t: self.pick(t), key=str(t))
+        self.chips.lay()
 
     def pick(self, t):
         self.type = t
         self.chips_fill()
         self.fill()
 
+    @staticmethod
+    def status(versions, kits):
+        """(TR-8S column text, row tag) for the TR-8S copies of a sample."""
+        if not versions:
+            return '', ()
+        n = sum(kits[v['id']] for v in versions)
+        us = ', '.join(str(v['id'] - t8k.USER_TONE + 1) for v in versions)
+        return (f'US {us} · {n} kit{"s" if n != 1 else ""}', ('used',)) if n else (f'US {us} · no kit', ('unused',))
+
     def fill(self):
         self.tree.delete(*self.tree.get_children())
         q = self.q.get().strip().lower()
         filtering = bool(q or self.type)
+        tones, kits = self.device()
+        state = dict(tones=list(tones.values())) if self.app.mem.state else None
         for it in self.items:
-            dev = self.on_device(it['path'])
-            if (self.type == ON_TR8S and not dev) or (self.type not in (None, ON_TR8S) and it['type'] != self.type) \
+            text, tag = self.status(self.app.uploads.on_device(it['path'], state), kits)
+            if (self.type == ON_TR8S and not text) or (self.type not in (None, ON_TR8S) and it['type'] != self.type) \
                     or (q and q not in it['rel'].lower()):
                 continue
-            parent = self.folder(it['root'], os.path.dirname(it['rel']), filtering)
-            self.tree.insert(parent, 'end', iid=it['path'], text=os.path.basename(it['path']),
-                             values=(it['type'], f'{it["secs"]:.2f}s', dev))
-
-    def on_device(self, path):
-        """'US 12' (or 'US 12, 40' for several versions) if this file is on the TR-8S, else ''."""
-        versions = self.app.uploads.on_device(path, self.app.mem.state)
-        return ('US ' + ', '.join(str(v['id'] - t8k.USER_TONE + 1) for v in versions)) if versions else ''
+            parent = '' if it['path'] == it['root'] else self.folder(it['root'], os.path.dirname(it['rel']), filtering)
+            self.tree.insert(parent, 'end', iid=it['path'], text=os.path.basename(it['path']), tags=tag,
+                             values=(it['type'], f'{it["secs"]:.2f}s', text))
+        if self.type in (None, ON_TR8S) and tones:  # every sample on the TR-8S, also ones not in the library
+            folder = self.tree.insert('', 0, iid='d:tr8s', open=self.type == ON_TR8S or bool(q),
+                                      text=f'TR-8S samples (read {time.strftime("%d %b %H:%M", time.localtime(self.app.mem.read_at))})')
+            for t in tones.values():
+                if not q or q in t['name'].lower():
+                    text, tag = self.status([t], kits)
+                    self.tree.insert(folder, 'end', iid=f'{self.TR8S}{t["id"]}', text=t['name'], tags=tag,
+                                     values=(lib.categorize(t['name']), f'{t["size"] / 2 / RATE:.2f}s', text))
 
     def folder(self, root, rel, open_all):
         iid = f'd:{root}|{rel}'
@@ -1498,7 +1718,7 @@ class Browser(tk.Frame):
 
     def preview(self):
         files = self.files()
-        if len(files) == 1:
+        if len(files) == 1 and not files[0].startswith(self.TR8S):  # TR-8S audio is not on the PC: no preview
             try:
                 a, sr = sf.read(files[0], dtype='float32', always_2d=True)
                 play(a[:, :2], sr)
@@ -1521,16 +1741,27 @@ class Browser(tk.Frame):
         if w is not None:
             self.load(frames.index(w))
 
+    def add_roots(self, paths):
+        """Add sample folders or single sample files to the library (each once)."""
+        new = [os.path.normpath(p) for p in paths if os.path.isdir(p) or p.lower().endswith(EXTS)]
+        new = [p for p in dict.fromkeys(new) if p not in self.roots]
+        if new:
+            self.roots += new
+            self.rescan()
+
+    def drop(self, e):
+        self.add_roots(self.app.root.tk.splitlist(e.data))
+        return e.action
+
     def add(self):
         d = filedialog.askdirectory(title='Add a sample folder or sample pack to the library')
-        if d and os.path.normpath(d) not in self.roots:
-            self.roots.append(os.path.normpath(d))
-            self.rescan()
+        if d:
+            self.add_roots([d])
 
     def remove(self):
         sel = self.tree.selection()
-        root = next((r for r in self.roots if sel and (sel[0].startswith(f'd:{r}|') or sel[0].startswith(r + os.sep))),
-                    None)
+        root = next((r for r in self.roots if sel and (sel[0] == r or sel[0].startswith(f'd:{r}|') or
+                                                      sel[0].startswith(r + os.sep))), None)
         if not root:
             return messagebox.showinfo(APP, 'Select something inside the sample pack you want to remove from the '
                                             'library. Files on disk are not touched.')
