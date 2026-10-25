@@ -25,6 +25,13 @@ assert usb.unpack7(usb.pack7(list(blob))) == blob and usb.pack7([0x80, 1, 0xff])
 # the kit data sent over USB is the .t8k KIT data with the pad tone ids, colors and name filled in
 body = t8k.kit_body('usb kit', [624, 635] + [27] * 9, [9] * 11, bytes(1312))
 assert len(body) == 1312 and body[:7] == b'USB KIT' and body[0x184:0x186] == (624).to_bytes(2, 'little')
+# a user sample on a pad that was a built-in sound's gets the TR-8S's sample settings (else it is silent);
+# built-in pads and pads that already held a sample (with the user's own settings) keep theirs
+pad = lambda k, i: k[0x184 + i * 0x34 + 2:0x184 + (i + 1) * 0x34]
+assert pad(body, 0) == pad(body, 1) == t8k.SAMPLE_PAD and pad(body, 2) == bytes(50)
+mine = bytearray(body)
+mine[0x184 + 2] = 0x42  # the user's own setting on a sample pad
+assert pad(t8k.kit_body('x', [700] + [27] * 10, [9] * 11, bytes(mine)), 0)[0] == 0x42
 msg = usb.TR8S.__new__(usb.TR8S)
 msg.dev = 0x10
 assert msg._sysex(usb.DT1, [0x50, 0, 0, 0x13], [0]) == [0xF0, 0x41, 0x10, 0, 0, 0, 0x45, 0x12, 0x50, 0, 0, 0x13, 0,

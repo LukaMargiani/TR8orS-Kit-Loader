@@ -778,8 +778,8 @@ class App:
         y += wh + px(4)
         cv.create_text(g, y, anchor='nw', text=name, fill=TEXT, font=F['bold'])
         y += bold
-        cv.create_text(g, y, anchor='nw', text=info, fill=info_fg, font=F['base'], width=w - 2 * g)
-        y += 2 * line
+        t = cv.create_text(g, y, anchor='nw', text=info, fill=info_fg, font=F['base'], width=w - 2 * g)
+        y = max(y + 2 * line, cv.bbox(t)[3])  # wrapped text pushes the buttons down instead of running under them
         if dev:
             t = cv.create_text(g, y, anchor='nw', text=dev, fill=dev_fg, font=F['base'], width=w - 2 * g)
             y = cv.bbox(t)[3]
@@ -840,7 +840,7 @@ class App:
                               WARN if b > SLOT_MAX else DIM, *self.device_text(s, short=True))
             else:
                 p['texts'] = (s.name or '— empty —',
-                              f'TR-8S sample US {s.rom - t8k.USER_TONE + 1} · no new memory\nSend by USB'
+                              f'On the TR-8S (US {s.rom - t8k.USER_TONE + 1}): no new memory\nNo preview · send by USB'
                               if s.rom is not None and s.rom >= t8k.USER_TONE else
                               'Built-in sound · no memory\n' if s.rom is not None else
                               f'Plays built-in {t8k.DEFAULT_ROM[i][1]}\nDrop a sample to replace', DIM, '', DIM)
