@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+# kits, projects and audio are user data, never part of the repo
+*.t8k
+*.tr8proj
+*.wav
+*.aif
+*.aiff
+*.flac
+*.bin
