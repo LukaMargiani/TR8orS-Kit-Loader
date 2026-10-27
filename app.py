@@ -48,8 +48,13 @@ PROJ_EXT = '.tr8proj'
 KIT_SAMPLES = os.path.join(KITS_DIR, 'Kit samples')  # samples of opened kits, as library files
 KEYS = '1234567890-'  # keyboard shortcuts that play pads BD..RC
 # pad settings that change the audio sent: any difference means the TR-8S stores another copy
-PARAM_KEYS = ('mono', 'lo', 'fit', 'start', 'end', 'fade_in', 'fade_out', 'hpf', 'lpf', 'gain', 'norm')
+PARAM_KEYS = ('mono', 'lo', 'fit', 'start', 'end', 'fade_in', 'fade_out', 'hpf', 'lpf', 'gain', 'norm', 'hpf_slope',
+              'lpf_slope', 'linear')
+# settings added later: copies sent before them were made with these values
+PARAM_DEFAULTS = dict(hpf_slope=24, lpf_slope=24, linear=False)
+SLOPES = (6, 12, 24, 36, 48)  # filter slopes in dB/oct (Butterworth order = slope / 6)
 SLOT_KEYS = ('name', 'rom', 'src', 'type', 'mono', 'lo', 'fit', 'start', 'end', 'fade_in', 'fade_out', 'hpf', 'lpf',
+             'hpf_slope', 'lpf_slope', 'linear',
              'gain', 'norm')
 
 # Ableton-style dark gray theme; HEX follows t8k.COLORS (the TR-8S color order)
@@ -175,8 +180,22 @@ def fade(a, ms, out):
     return a
 
 
-def filt(a, kind, hz):
-    return signal.sosfilt(signal.butter(4, hz, kind, fs=RATE, output='sos'), a, axis=0).astype('float32')
+def filt(a, kind, hz, slope=24, linear=False):
+    """Butterworth filter, slope 6-48 dB/oct. linear: the same magnitude with no phase shift (applied in the
+    frequency domain), which keeps phase intact but can smear a hit's attack with a faint pre-echo."""
+    sos = signal.butter(slope // 6, hz, kind, fs=RATE, output='sos')
+    if not linear:
+        return signal.sosfilt(sos, a, axis=0).astype('float32')
+    n = 1 << (2 * len(a) - 1).bit_length()  # zero padding, so the response's tails do not wrap around
+    h = np.abs(signal.sosfreqz(sos, np.fft.rfftfreq(n, 1 / RATE), fs=RATE)[1])
+    return np.fft.irfft(np.fft.rfft(a, n, axis=0) * h[:, None], n, axis=0)[:len(a)].astype('float32')
+
+
+def guard(a):
+    """Clip guard: audio over 0 dB (e.g. after cutting the lows, or Volume above 0 dB) is turned down as a whole so
+    its peak is 0 dB, instead of being clipped (distorted). Audio at or below 0 dB is left untouched."""
+    peak = np.abs(a).max() if len(a) else 0.0
+    return a / peak if peak > 1 else a
 
 
 def loud_range(a, db=-60):
@@ -224,6 +243,8 @@ class Slot:
         self.fade_in = self.fade_out = 0.0
         self.hpf, self.lpf = HPF_OFF, LPF_OFF
         self.gain, self.norm = 0.0, False
+        for k, v in PARAM_DEFAULTS.items():
+            setattr(self, k, v)
 
     def channels(self):
         return 1 if self.mono else self.audio.shape[1]
@@ -253,9 +274,9 @@ class Slot:
         if self.mono:
             a = a.mean(axis=1, keepdims=True)
         if self.hpf > HPF_OFF:
-            a = filt(a, 'highpass', self.hpf)
+            a = filt(a, 'highpass', self.hpf, self.hpf_slope, self.linear)
         if self.lpf < LPF_OFF:
-            a = filt(a, 'lowpass', self.lpf)
+            a = filt(a, 'lowpass', self.lpf, self.lpf_slope, self.linear)
         peak = np.abs(a).max() if self.norm else 0
         a = a * (10 ** (self.gain / 20) / (peak if peak > 0 else 1))  # -inf dB -> silence
         n = self.length()
@@ -269,14 +290,14 @@ class Slot:
             a = fade(a, DECLICK_MS, False)
         if self.fade_out < DECLICK_MS and (self.end < len(self.audio) or np.abs(a[-1]).max() * 32768 >= 0.5):
             a = fade(a, DECLICK_MS, True)
-        return a
+        return guard(a)
 
     def render(self):
         """(int16 array, sample rate) exactly as it goes to the TR-8S."""
         a = self.process()
         rate = LO_RATE if self.lo else RATE
         # x32768 (not 32767): an untouched 16-bit sample comes back bit-identical, so the TR-8S can match it
-        return np.clip((resample(a, RATE, rate) * 32768).round(), -32768, 32767).astype('<i2'), rate
+        return np.clip((guard(resample(a, RATE, rate)) * 32768).round(), -32768, 32767).astype('<i2'), rate
 
 
 # ---- widgets ----
@@ -393,7 +414,7 @@ def wrap(label):
     """Let a label's text wrap to its current width instead of being cut off."""
     def fit(e):
         w = max(100, e.width - 20)
-        if int(label.cget('wraplength')) != w:
+        if str(label.cget('wraplength')) != str(w):  # ttk labels report '' until set
             label.config(wraplength=w)
     label.bind('<Configure>', fit)
     return label
@@ -482,12 +503,22 @@ def magnifier_cursor():
     return '@' + path.replace('\\', '/')
 
 
-def smooth(cv, width, height, paint):
-    """Draw with PIL at SS x size and shrink: Tk canvas lines and arcs are not anti-aliased."""
-    im = Image.new('RGB', (width * SS, height * SS), BG)
+def smooth(cv, width, height, paint, bg=BG, x=0, y=0, key='photo'):
+    """Draw with PIL at SS x size and shrink: Tk canvas lines, arcs and polygons are not anti-aliased."""
+    width, height = max(1, round(width)), max(1, round(height))
+    im = Image.new('RGB', (width * SS, height * SS), bg)
     paint(ImageDraw.Draw(im))
-    cv.photo = ImageTk.PhotoImage(im.resize((width, height), Image.LANCZOS), master=cv)
-    cv.create_image(0, 0, image=cv.photo, anchor='nw')
+    setattr(cv, key, ImageTk.PhotoImage(im.resize((width, height), Image.LANCZOS), master=cv))
+    cv.create_image(x, y, image=getattr(cv, key), anchor='nw')
+
+
+def paint_waves(d, w, h, layers):
+    """PIL painter for smooth(): the zero line, then each (audio, x0, x1, color) waveform, at SS x resolution."""
+    d.line((0, h * SS / 2, w * SS, h * SS / 2), fill=LINE, width=SS)
+    for a, x0, x1, color in layers:
+        if a is not None and len(a) > 1 and x1 - x0 > 0:
+            pts = wave_points(a, x0 * SS, x1 * SS, h * SS)
+            d.polygon(list(zip(pts[0::2], pts[1::2])), fill=color, outline=color, width=SS)  # silence stays visible
 
 
 def fmt_time(ms):
@@ -604,9 +635,14 @@ class App:
             bar.add(text, cmd, gap=px(12) if k == 0 else None)
         bar.add('Kit name', gap=px(14))
         bar.add(widget=ttk.Entry(bar, font=F['base'], textvariable=self.name, width=18))
-        bar.add('Size', gap=px(14))
+        self.zoom_var = tk.DoubleVar(value=self.zoom)
+        self.size_menu = tk.Menu(root, tearoff=0, bg=PANEL, fg=TEXT, activebackground=ACCENT, activeforeground='#111',
+                                 font=F['base'])
         for z in ZOOMS:
-            bar.add(f'{round(z * 100)}%', lambda z=z: self.set_zoom(z), key=z, gap=px(2))
+            self.size_menu.add_radiobutton(label=f'{round(z * 100)}%', variable=self.zoom_var, value=z,
+                                           command=lambda z=z: self.set_zoom(z))
+        bar.add('Size', lambda: self.size_menu.tk_popup(root.winfo_pointerx(), root.winfo_pointery()), key='size',
+                gap=px(14))
 
         wrap(tk.Label(root, bg=BG, fg=DIM, font=F['base'], anchor='w', justify='left', text=RULE_OF_THUMB)).pack(
             side='bottom', fill='x', padx=12, pady=(0, 8))
@@ -615,11 +651,11 @@ class App:
         tk.Label(mem, text='TR-8S MEMORY', bg=PANEL, fg=DIM, font=F['small_bold']).pack(side='left', padx=(8, 6))
         self.mem_bar = tk.Canvas(mem, width=180, height=12, bg=FIELD, highlightthickness=0)
         self.mem_bar.pack(side='left', pady=8)
-        self.mem_text = Legend(mem, PANEL, TEXT)
-        self.mem_text.pack(side='left', padx=8, fill='x', expand=True)
         button(mem, 'Details…', lambda: details(self)).pack(side='right', padx=6, pady=4)
         button(mem, '?', lambda: rules(self.root), padx=8).pack(side='right', padx=(0, 6), pady=4)
         button(mem, 'Read TR-8S (USB)', lambda: read_device(self, self.root)).pack(side='right', pady=4)
+        self.mem_text = Legend(mem, PANEL, TEXT)  # packed after the buttons: it wraps instead of pushing them out
+        self.mem_text.pack(side='left', padx=8, fill='x', expand=True)
 
         panes = tk.PanedWindow(root, orient='horizontal', bg=LINE, sashwidth=5, bd=0)
         panes.pack(fill='both', expand=True, padx=(10, 0))
@@ -725,8 +761,11 @@ class App:
         return self.logo_img
 
     def light_size(self):
-        for z in ZOOMS:
-            self.bar.light(z, z == self.zoom)
+        self.zoom_var.set(self.zoom)
+        item = next(it for it in self.bar.items if it['key'] == 'size')
+        item['text'] = f'Size {round(self.zoom * 100)}% ▾'
+        self.bar.drawn = None
+        self.bar.lay()
 
     def select(self, i):
         self.sel = i
@@ -779,6 +818,7 @@ class App:
 
     # ---- pads ----
 
+    SHORT = {'22.05 kHz': '22k'}  # for narrow pads
     PAD_BUTTONS = [[('play', '▶'), ('edit', 'Edit')], [('mono', 'Mono'), ('lo', '22.05 kHz'), ('fit', 'Fit')]]
 
     def draw_pad(self, i):
@@ -788,7 +828,7 @@ class App:
         if w < 20 or p['texts'] is None:
             return
         color = HEX[self.meta['colors'][i]]
-        key = (w, self.zoom, color, id(s.audio), s.start, s.end, s.mono, s.lo, s.fit, p['texts'])
+        key = (w, self.zoom, color, id(s.audio), tuple(s.params().items()), p['texts'])
         if p['drawn'] == key:
             return
         p['drawn'] = key
@@ -801,13 +841,8 @@ class App:
                        fill='#111', font=F['bold'], tags='head')
         cv.create_text(w - g, hh / 2, anchor='e', text='✕', fill='#111', font=F['bold'], tags='b:clear')
         y, wh = hh + g, round(PAD_WAVE_H * self.zoom)
-        cv.create_rectangle(g, y, w - g, y + wh, fill=WAVE_BG, width=0)
-        cv.create_line(g, y + wh / 2, w - g, y + wh / 2, fill=LINE)
-        a = None if s.audio is None else s.audio[s.start:s.end]
-        if a is not None and len(a) > 1:
-            pts = wave_points(a, g, w - g, wh)
-            pts[1::2] = [v + y for v in pts[1::2]]
-            cv.create_polygon(pts, fill=color, outline=color)
+        layers = [(None if s.audio is None else s.process(), 0, w - 2 * g, color)]  # what goes to the TR-8S
+        smooth(cv, w - 2 * g, wh, lambda d: paint_waves(d, w - 2 * g, wh, layers), bg=WAVE_BG, x=g, y=y, key='wave')
         y += wh + px(4)
         cv.create_text(g, y, anchor='nw', text=name, fill=TEXT, font=F['bold'])
         y += bold
@@ -825,6 +860,8 @@ class App:
                 lit = b in ('mono', 'lo', 'fit') and getattr(s, b)
                 cv.create_rectangle(x0, y, x0 + bw, y + bh, width=0, fill=ACCENT if lit else RAISED,
                                     tags=(f'b:{b}', 'btn', 'face', 'lit' if lit else 'off'))
+                if F['base'].measure(text) > bw - px(6):
+                    text = self.SHORT.get(text, text)
                 cv.create_text(x0 + bw / 2, y + bh / 2, text=text, fill='#111' if lit else TEXT, font=F['base'],
                                tags=(f'b:{b}', 'btn'))
             y += bh + px(2)
@@ -902,7 +939,7 @@ class App:
     def device_status(self, s):
         """(versions of this pad's library file on the TR-8S, the version matching the pad's settings or None)."""
         versions = self.uploads.on_device(s.src, self.mem.state)
-        return versions, next((v for v in versions if v['params'] == s.params()), None)
+        return versions, next((v for v in versions if dict(PARAM_DEFAULTS, **v['params']) == s.params()), None)
 
     def device_text(self, s, short=False):
         versions, match = self.device_status(s)
@@ -921,7 +958,7 @@ class App:
         """Give the pad the settings its library file has on the TR-8S, so sending re-uses that copy."""
         versions = self.device_status(s)[0]
         if versions:
-            for k, v in versions[-1]['params'].items():
+            for k, v in dict(PARAM_DEFAULTS, **versions[-1]['params']).items():
                 setattr(s, k, v)
 
     def kit_params(self):
@@ -1042,10 +1079,10 @@ class App:
         if d:
             self.assign([os.path.join(d, f) for f in sorted(os.listdir(d)) if f.lower().endswith(EXTS)])
 
-    def open(self):
+    def open(self, p=None):
         if not self.confirm_discard():
             return
-        p = filedialog.askopenfilename(initialdir=KITS_DIR, filetypes=[
+        p = p or filedialog.askopenfilename(initialdir=KITS_DIR, filetypes=[
             ('Projects and kits', f'*{PROJ_EXT} *.t8k'), ('TR8orS project', f'*{PROJ_EXT}'), ('TR-8S kit', '*.t8k')])
         if not p:
             return
@@ -1374,8 +1411,16 @@ class Editor(tk.Toplevel):
                      default=default, color=self.color, on_change=self.changed, **kw)
             k.pack(side='left', padx=(0, 14))
             self.knobs.append(k)
-        self.graph = tk.Canvas(ctl, width=self.GRAPH_W, height=Knob.H, bg=BG, highlightthickness=0)
-        self.graph.pack(side='left')
+        col = tk.Frame(ctl, bg=BG)
+        col.pack(side='left')
+        self.graph = tk.Canvas(col, width=self.GRAPH_W, height=Knob.H, bg=BG, highlightthickness=0)
+        self.graph.pack()
+        self.fbar = ButtonBar(col, BG, gap=px(2), font='small')
+        self.fbar.add('HPF', lambda: self.slope('hpf_slope'), key='hpf')
+        self.fbar.add('LPF', lambda: self.slope('lpf_slope'), key='lpf')
+        self.fbar.add('Linear phase', self.toggle_linear, key='linear')
+        self.fbar.pack(fill='x')
+        self.filter_bar()
         # the sample's own spectrum (gray), so the graph shows what the filters take away
         m = self.s.audio[:RATE * 10].mean(axis=1)
         f, psd = signal.welch(m, RATE, nperseg=min(4096, len(m)))
@@ -1445,16 +1490,13 @@ class Editor(tk.Toplevel):
         cv, s = self.cv, self.s
         cv.delete('all')
         w, h = cv.winfo_width(), cv.winfo_height()
-        cv.create_line(0, h / 2, w, h / 2, fill=LINE)
         i0, i1 = int(self.v0), min(len(s.audio), int(math.ceil(self.v1)) + 1)
-        if i1 - i0 > 1:
-            cv.create_polygon(wave_points(s.audio[i0:i1], self.f2x(i0), self.f2x(i1), h), fill=GHOST, outline=GHOST)
         if self.proc is None:
             self.proc = s.process()
         a0, a1 = max(i0, s.start), min(i1, s.start + len(self.proc))  # the result, where it is in view
-        if a1 - a0 > 1:
-            cv.create_polygon(wave_points(self.proc[a0 - s.start:a1 - s.start], self.f2x(a0), self.f2x(a1), h),
-                              fill=self.color, outline=self.color)
+        layers = [(s.audio[i0:i1], self.f2x(i0), self.f2x(i1), GHOST),
+                  (self.proc[a0 - s.start:a1 - s.start] if a1 > a0 else None, self.f2x(a0), self.f2x(a1), self.color)]
+        smooth(cv, w, h, lambda d: paint_waves(d, w, h, layers), bg=WAVE_BG, key='wave')
         xs, xe = self.f2x(s.start), self.f2x(s.end)
         for x0, x1 in ((0, xs), (xe, w)):
             if x1 > x0:
@@ -1499,9 +1541,10 @@ class Editor(tk.Toplevel):
         g, s, W, H = self.graph, self.s, self.GRAPH_W, Knob.H
         g.delete('all')
         resp = np.zeros_like(self.FREQS)
-        for on, kind, hz in ((s.hpf > HPF_OFF, 'highpass', s.hpf), (s.lpf < LPF_OFF, 'lowpass', s.lpf)):
-            if on:
-                _, hr = signal.sosfreqz(signal.butter(4, hz, kind, fs=RATE, output='sos'), self.FREQS, fs=RATE)
+        for on, kind, hz, slope in ((s.hpf > HPF_OFF, 'highpass', s.hpf, s.hpf_slope),
+                                    (s.lpf < LPF_OFF, 'lowpass', s.lpf, s.lpf_slope)):
+            if on:  # linear phase has the same magnitude, so the same curve
+                _, hr = signal.sosfreqz(signal.butter(slope // 6, hz, kind, fs=RATE, output='sos'), self.FREQS, fs=RATE)
                 resp += 20 * np.log10(np.abs(hr) + 1e-9)
         top, bot = px(18), H - px(16)
         xs = np.linspace(0, W, len(self.FREQS)) * SS
@@ -1522,9 +1565,25 @@ class Editor(tk.Toplevel):
         for hz, label in ((100, '100'), (1000, '1k'), (10000, '10k')):
             g.create_text(math.log(hz / 20, 1000) * W, H - px(7), text=label, fill=DIM, font=F['small'])
 
+    def filter_bar(self):
+        """Slope buttons show the current slopes; Linear phase is lit when on."""
+        self.fbar.items[0]['text'] = f'HPF {self.s.hpf_slope} dB/oct'
+        self.fbar.items[1]['text'] = f'LPF {self.s.lpf_slope} dB/oct'
+        self.fbar.light('linear', self.s.linear)
+
+    def slope(self, attr):
+        """Next filter slope (6 → 12 → 24 → 36 → 48 → 6 dB/oct)."""
+        setattr(self.s, attr, SLOPES[(SLOPES.index(getattr(self.s, attr)) + 1) % len(SLOPES)])
+        self.changed()
+
+    def toggle_linear(self):
+        self.s.linear = not self.s.linear
+        self.changed()
+
     def changed(self):
         """Redraw now; the main window and the TR-8S check follow once the mouse rests (they are slower)."""
         self.proc = None
+        self.filter_bar()
         self.schedule()
         if self.later:
             self.after_cancel(self.later)
@@ -1579,6 +1638,7 @@ class Editor(tk.Toplevel):
 
 
 ON_TR8S = 'On TR-8S'  # library filter: files already on the TR-8S
+KITS = 'Kits'  # library filter: your kits, on the PC and on the TR-8S
 
 
 class Browser(tk.Frame):
@@ -1587,6 +1647,7 @@ class Browser(tk.Frame):
     Drop folders or files here to add them. The TR-8S folder lists the samples on the TR-8S (from the last read);
     loading one makes the pad use it as it is, with no new memory (USB only)."""
     TR8S = 'tr8s:'  # tree id prefix of a sample on the TR-8S, e.g. 'tr8s:640'
+    KIT = 'kit:'  # tree id prefix of a kit: its file path, or its name if it is only on the TR-8S
 
     def __init__(self, parent, app, roots):
         super().__init__(parent, bg=BG)
@@ -1608,6 +1669,7 @@ class Browser(tk.Frame):
                text='Click = preview · double-click / Enter = load into the selected pad · drag onto a pad · drop '
                     'folders or files here to add them. TR-8S column: {green} = used by a kit, {yellow} = on the '
                     'TR-8S but in no kit.').pack(side='bottom', fill='x', pady=(4, 8))
+        button(self, 'Close all folders', self.close_all, font=F['small']).pack(side='bottom', anchor='w')
         box = tk.Frame(self, bg=BG)
         box.pack(fill='both', expand=True)
         self.tree = ttk.Treeview(box, columns=('type', 'len', 'dev'), selectmode='extended')
@@ -1652,6 +1714,12 @@ class Browser(tk.Frame):
             for it in lib.scan(r):
                 items.setdefault(it['path'], dict(it, root=r))
         self.items = list(items.values())
+        self.kit_files = {}
+        for r in [r for r in self.roots if os.path.isdir(r)] + [KITS_DIR]:
+            for d, _, fs in os.walk(r):
+                for f in fs:
+                    if f.lower().endswith(('.t8k', PROJ_EXT)):
+                        self.kit_files.setdefault(os.path.normcase(os.path.join(d, f)), os.path.join(d, f))
         self.app.root.config(cursor='')
         self.chips_fill()
         self.fill()
@@ -1669,6 +1737,7 @@ class Browser(tk.Frame):
         chips = [(None, f'All {len(self.items)}')] + [(t, f'{t} {counts[t]}') for t in lib.TYPE_NAMES if counts[t]]
         if self.app.mem.state:
             chips.append((ON_TR8S, f'On TR-8S {len(self.app.mem.state["tones"])}'))
+        chips.append((KITS, f'Kits {len(self.kits())}'))
         self.chips.lit = {str(self.type)}
         for t, text in chips:
             self.chips.add(text, lambda t=t: self.pick(t), key=str(t))
@@ -1688,9 +1757,32 @@ class Browser(tk.Frame):
         us = ', '.join(str(v['id'] - t8k.USER_TONE + 1) for v in versions)
         return (f'US {us} · {n} kit{"s" if n != 1 else ""}', ('used',)) if n else (f'US {us} · no kit', ('unused',))
 
+    def kits(self):
+        """Your kits by name: {name: (kit file paths on the PC, TR-8S kit slots)}. On the TR-8S only kits with your
+        samples, or with the name of a kit file, count as yours (factory kits use built-in sounds only)."""
+        # shortcut: a kit file's name is its file name (the name inside is not read, to keep the list fast)
+        out = {}
+        for path in self.kit_files.values():
+            out.setdefault(os.path.splitext(os.path.basename(path))[0].upper()[:16].strip(), ([], []))[0].append(path)
+        for k in (self.app.mem.state or {}).get('kits', []):
+            name = k['name'].upper().strip()
+            if any(t >= t8k.USER_TONE for t in k['tones']) or name in out:
+                out.setdefault(name, ([], []))[1].append(k['id'] + 1)
+        return out
+
+    def fill_kits(self, q):
+        for name, (paths, slots) in sorted(self.kits().items()):
+            if q and q not in name.lower():
+                continue
+            where = ' · '.join((['PC'] if paths else []) + ([f'TR-8S {", ".join(map(str, slots))}'] if slots else []))
+            self.tree.insert('', 'end', iid=f'{self.KIT}{paths[0] if paths else name}', text=name,
+                             values=('Project' if paths and paths[0].endswith(PROJ_EXT) else 'Kit', '', where))
+
     def fill(self):
         self.tree.delete(*self.tree.get_children())
         q = self.q.get().strip().lower()
+        if self.type == KITS:
+            return self.fill_kits(q)
         filtering = bool(q or self.type)
         tones, kits = self.device()
         state = dict(tones=list(tones.values())) if self.app.mem.state else None
@@ -1715,15 +1807,20 @@ class Browser(tk.Frame):
         iid = f'd:{root}|{rel}'
         if not self.tree.exists(iid):
             parent = '' if not rel else self.folder(root, os.path.dirname(rel), open_all)
-            self.tree.insert(parent, 'end', iid=iid, text=os.path.basename(rel or root), open=open_all or not rel)
+            self.tree.insert(parent, 'end', iid=iid, text=os.path.basename(rel or root), open=open_all)
         return iid
+
+    def close_all(self, parent=''):
+        for iid in self.tree.get_children(parent):
+            self.tree.item(iid, open=False)
+            self.close_all(iid)
 
     def files(self):
         return [i for i in self.tree.selection() if not i.startswith('d:')]
 
     def preview(self):
         files = self.files()
-        if len(files) == 1 and not files[0].startswith(self.TR8S):  # TR-8S audio is not on the PC: no preview
+        if len(files) == 1 and not files[0].startswith((self.TR8S, self.KIT)):  # TR-8S audio is not on the PC
             try:
                 a, sr = sf.read(files[0], dtype='float32', always_2d=True)
                 play(a[:, :2], sr)
@@ -1732,6 +1829,14 @@ class Browser(tk.Frame):
 
     def load(self, pad):
         files = self.files()
+        kits = [f[len(self.KIT):] for f in files if f.startswith(self.KIT)]
+        if kits:
+            if os.path.exists(kits[0]):
+                self.app.open(kits[0])
+            else:
+                messagebox.showinfo(APP, f'{kits[0]} is only on the TR-8S. Opening kits from the TR-8S is not '
+                                         'possible yet: open its .t8k (export it to the SD card on the TR-8S).')
+            return
         if files:
             self.app.assign(files, pad)
             self.app.select(min(pad + len(files), 10))  # next pad, so a kit can be built click by click

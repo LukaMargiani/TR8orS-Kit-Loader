@@ -135,7 +135,7 @@ and take no time.
 | **Export to SD card** | Writes the kit straight into `ROLAND\TR-8S\EXPORT\KIT` on the SD card. |
 | **TR-8S rules** | All the memory and format rules, in plain language. |
 | **Kit name** | Up to 16 characters, shown on the TR-8S display. |
-| **Size** | 80–120 %: makes all text, pads and lists smaller or larger. |
+| **Size** | A dropdown, 80–120 %: makes all text, pads and lists smaller or larger. |
 
 The toolbar wraps onto a second line when the window is narrow.
 
@@ -168,7 +168,8 @@ Click **Edit** on a pad.
 
 - **The waveform shows the result.** The untouched sample is drawn in gray, and in front of it, in the pad's color, is
   exactly what goes to the TR-8S: fades, filters, Volume and Normalize included. You see a fade-out make the tail
-  shrink, or a high-pass filter take the low end out of a kick.
+  shrink, or a high-pass filter take the low end out of a kick. The pads show this result too (without the fade
+  lines).
 - **S / E markers.** Drag on the waveform to move the nearest marker (S = start, E = end). The darkened parts are cut
   off.
 - **Zoom (like Simpler).** Point at the time ruler above the waveform: the cursor becomes a magnifying glass. Click a
@@ -178,10 +179,15 @@ Click **Edit** on a pad.
   arrow keys control turns orange.
   - **Volume:** −∞ to +6 dB, default 0 dB.
   - **Fade in / Fade out:** smooth S-curve fades, also shown as the white line.
-  - **HPF / LPF:** high-pass and low-pass filters.
+  - **HPF / LPF:** high-pass and low-pass filters. Under the filter graph, **HPF … dB/oct** and **LPF … dB/oct**
+    switch each filter's slope (6, 12, 24, 36 or 48 dB/oct; 24 is the default). **Linear phase** keeps the phase
+    intact, but it can smear the attack of a hit with a faint pre-echo, so try it by ear.
 - **Filter graph** (next to the knobs): the white line is the HPF/LPF response. Gray is the sample's own frequency
   spectrum, and the colored part is what is left after the filters.
 - **Normalize:** when on, the sample is raised to full level (peak 0 dB) before the volume knob.
+- **Clip guard (always on):** if the edits push the sample over 0 dB (cutting the lows can make it louder, and so can
+  Volume above 0 dB), the whole sample is turned down until its peak is at 0 dB, so it never distorts. A sample that
+  stays at or below 0 dB is not changed.
 - **Trim silence:** moves the markers to where the sound starts and ends.
 - **Play** previews exactly what will go into the kit. **Reset** undoes all edits.
 - The top line shows the new length, the size and how many TR-8S memory blocks the sample takes.
@@ -201,6 +207,7 @@ The panel on the left.
 - **Samples of opened kits join the library.** When you open a `.t8k` kit (or a project whose samples are no longer on
   your PC), its samples are saved as WAV files in `Documents\TR8orS-Kit-Loader\Kit samples\<kit name>` and that
   folder is added to the library, so you can use them in other kits.
+- Folders start closed. **Close all folders** (under the list) closes any you opened.
 - **Search** filters by name. The **type chips** (Kick, Snare, Closed hat…) filter by type and show how many samples of
   each type you have. Types come from file and folder names.
 - **Click** a sample to preview it. **Double-click** it, or press **Enter**, to load it into the selected pad. You can
@@ -210,6 +217,10 @@ The panel on the left.
   is, using no new memory. Such pads can only be sent with **Send to TR-8S (USB)**, since a kit file cannot point at
   samples already on the TR-8S. These samples cannot be previewed, because their audio is on the TR-8S, not on your PC.
   The **On TR-8S** chip shows only what is on the TR-8S.
+- **The Kits chip** lists your kits: the `.t8k` and `.tr8proj` files in your library folders and in
+  `Documents\TR8orS-Kit-Loader`, and the kits on the TR-8S that use your samples (factory kits are left out). The
+  TR-8S column says where each kit is: `PC`, `TR-8S 12` (kit slot 12), or `PC · TR-8S 12` for both. Kits are matched
+  by name (a kit file's file name). Double-click a kit file to open it.
 - **The TR-8S column** tells you where a sample is used:
   - <b>green</b>, for example `US 12 · 3 kits`: on the TR-8S and used by kits;
   - <b>yellow</b>, `US 12 · no kit`: on the TR-8S, but no kit uses it (it still takes memory);
