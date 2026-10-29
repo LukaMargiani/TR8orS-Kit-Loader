@@ -22,6 +22,30 @@ assert usb.offset(usb.offset(usb.KIT_TONE[0], usb.BLOCK, 6), [0x01, 0x00], 10) =
 assert usb.offset(usb.UTILITY, [usb.COMMAND['deleteTone']]) == [0x50, 0, 0, 0x24]
 blob = os.urandom(1312)
 assert usb.unpack7(usb.pack7(list(blob))) == blob and usb.pack7([0x80, 1, 0xff]) == [0b101, 0, 1, 0x7f]
+# filters: slope sets the steepness; linear phase keeps the same magnitude with no delay (zero phase)
+imp = np.zeros((4096, 1), 'float32')
+imp[2048] = 1
+spec = lambda x: np.abs(np.fft.rfft(x[:, 0]))
+f = np.fft.rfftfreq(4096, 1 / app.RATE)
+at = lambda x, hz: spec(x)[np.argmin(abs(f - hz))]
+low = {sl: at(app.filt(imp, 'highpass', 1000, sl), 250) for sl in app.SLOPES}  # two octaves below the cutoff
+assert all(low[a] > low[b] for a, b in zip(app.SLOPES, app.SLOPES[1:]))  # steeper slope, less left
+assert abs(20 * np.log10(low[24]) + 48) < 2  # 24 dB/oct: about -48 dB two octaves down
+lin = app.filt(imp, 'highpass', 1000, 24, linear=True)
+assert abs(at(lin, 250) - low[24]) < 1e-3 and np.argmax(abs(lin[:, 0])) == 2048  # same magnitude, peak not delayed
+# a TR-8S copy sent before slopes existed (24 dB/oct, not linear) still matches a pad with those settings
+old = app.Slot()
+old.set('x', imp)
+assert app.PARAM_DEFAULTS.items() <= old.params().items()
+
+# clip guard: a pad pushed over 0 dB is turned down as a whole (same shape), never clipped
+hot = app.Slot()
+hot.set('hot', (0.9 * np.sin(np.linspace(0, 40 * np.pi, 4410))).astype('float32')[:, None])
+hot.gain = 6.0
+x = hot.render()[0][:, 0].astype(float)
+assert abs(x).max() <= 32768 and np.corrcoef(x, hot.audio[:, 0])[0, 1] > 0.9999  # a sine, not a squared-off one
+assert app.guard(np.array([[0.5], [-1.0]])).max() == 0.5  # at or below 0 dB: untouched (bit-identical re-use)
+
 # the kit data sent over USB is the .t8k KIT data with the pad tone ids, colors and name filled in
 body = t8k.kit_body('usb kit', [624, 635] + [27] * 9, [9] * 11, bytes(1312))
 assert len(body) == 1312 and body[:7] == b'USB KIT' and body[0x184:0x186] == (624).to_bytes(2, 'little')
@@ -123,6 +147,7 @@ app.messagebox.askyesno = lambda *a, **k: True
 app.messagebox.showinfo = lambda *a, **k: None
 app.SETTINGS, app.MEMORY = os.path.join(tmp, 'settings.json'), os.path.join(tmp, 'live.json')  # never the user's
 app.UPLOADS = os.path.join(tmp, 'uploads.json')
+app.KITS_DIR, app.KIT_SAMPLES = os.path.join(tmp, 'kits'), os.path.join(tmp, 'kits', 'Kit samples')
 app.KIT_PARAMS = os.path.join(tmp, 'kit_params.bin')  # as if copied from a TR-8S
 open(app.KIT_PARAMS, 'wb').write(meta['kit'])
 app.play = lambda *a: None
@@ -347,6 +372,22 @@ ui.browser.add_roots([loose, loose])
 assert ui.browser.roots.count(loose) == 1 and loose in ui.browser.tree.get_children('')
 ui.browser.roots.remove(os.path.normpath(k2))
 ui.browser.roots.remove(loose)
+# Kits view: your kits on the PC and on the TR-8S, and where each one is; factory kits are left out
+for f in ('Both.t8k', 'Pc only.tr8proj'):
+    open(os.path.join(pack, f), 'wb').close()
+ui.mem.state = live(500, 1, 2)  # kits K0 and K1 use a user sample; K2.. are factory (built-in sounds only)
+ui.mem.state['kits'][5]['name'] = 'BOTH'  # a factory-sounds kit with the name of a kit file: yours too
+ui.browser.rescan()
+ui.browser.pick(app.KITS)
+rows = {ui.browser.tree.item(i, 'text'): ui.browser.tree.set(i, 'dev') for i in ui.browser.tree.get_children('')}
+assert rows == {'BOTH': 'PC · TR-8S 6', 'PC ONLY': 'PC', 'K0': 'TR-8S 1', 'K1': 'TR-8S 2'}, rows
+ui.browser.pick(None)
+# folders start closed (open only while searching or filtering); Close all folders closes opened ones again
+top = [i for i in ui.browser.tree.get_children('') if i.startswith('d:') and i != 'd:tr8s']
+assert top and not any(ui.browser.tree.item(i, 'open') for i in top)
+ui.browser.tree.item(top[0], open=True)
+ui.browser.close_all()
+assert not ui.browser.tree.item(top[0], 'open')
 ui.browser.rescan()
 ui.mem.state = None
 
@@ -373,9 +414,8 @@ click(ui.pads[0]['cv'], 'b:fit')
 assert ui.slots[0].fit
 click(ui.pads[0]['cv'], 'b:clear')
 assert ui.slots[0].audio is None
-size = next(i for i, it in enumerate(ui.bar.items) if it['key'] == 1.2)
-click(ui.bar, f'b:{size}')
-assert ui.zoom == 1.2
+ui.size_menu.invoke(app.ZOOMS.index(1.2))  # the Size dropdown
+assert ui.zoom == 1.2 and any(it['text'] == 'Size 120% ▾' for it in ui.bar.items)
 ui.set_zoom(1.0)
 root.withdraw()
 
