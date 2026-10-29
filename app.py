@@ -28,7 +28,7 @@ import library as lib
 import t8k
 
 APP = 'TR8orS-Kit-Loader'
-VERSION = 'x2V1.1.0'  # the GitHub release tag
+VERSION = 'x2V1.2.0'  # the GitHub release tag
 RATE, LO_RATE = t8k.RATE, 22050
 SLOT_MAX, KIT_MAX = 4 << 20, 12 << 20
 EXTS = lib.EXTS
